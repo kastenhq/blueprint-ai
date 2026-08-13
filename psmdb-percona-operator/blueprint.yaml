@@ -1,0 +1,136 @@
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: psmdb-blueprint
+  namespace: kasten-io
+actions:
+
+  backupPrehook:
+    outputArtifacts:
+      psmdbMeta:
+        keyValue:
+          quiescedPVC: "{{ .Phases.quiesceSecondary.Output.quiescedPVC }}"
+    phases:
+    - func: KubeTask
+      name: quiesceSecondary
+      args:
+        namespace: kasten-io
+        image: michaelcourcy/kasten-tools:8.5.2
+        command:
+        - bash
+        - -o
+        - errexit
+        - -o
+        - pipefail
+        - -c
+        - |
+          APP_NS="{{ .Object.metadata.namespace }}"
+          CR_NAME="{{ .Object.metadata.name }}"
+          CRED_SECRET="${CR_NAME}-secrets"
+
+          CLUSTER_ADMIN_USER=$(kubectl get secret "${CRED_SECRET}" -n "${APP_NS}" \
+            -o jsonpath='{.data.MONGODB_CLUSTER_ADMIN_USER}' | base64 -d)
+          CLUSTER_ADMIN_PASS=$(kubectl get secret "${CRED_SECRET}" -n "${APP_NS}" \
+            -o jsonpath='{.data.MONGODB_CLUSTER_ADMIN_PASSWORD}' | base64 -d)
+
+          REPLSET=$(kubectl get psmdb "${CR_NAME}" -n "${APP_NS}" \
+            -o jsonpath='{.spec.replsets[0].name}')
+          REPLICAS=$(kubectl get psmdb "${CR_NAME}" -n "${APP_NS}" \
+            -o jsonpath='{.spec.replsets[0].size}')
+
+          # Remove any stale kasten.io/psmdb-quiesced label from a previous backup.
+          # Required: a failover between backups would leave the label on the old secondary.
+          for PVC in $(kubectl get pvc -n "${APP_NS}" \
+            -l "app.kubernetes.io/instance=${CR_NAME},kasten.io/psmdb-quiesced=true" \
+            -o jsonpath='{.items[*].metadata.name}'); do
+            kubectl label pvc "${PVC}" -n "${APP_NS}" kasten.io/psmdb-quiesced-
+            echo "Removed stale quiesced label from: ${PVC}"
+          done
+
+          # Iterate from the highest ordinal down — pick the first secondary found.
+          TARGET_POD=""
+          for (( i=REPLICAS-1; i>=0; i-- )); do
+            POD="${CR_NAME}-${REPLSET}-${i}"
+            ROLE=$(kubectl exec -n "${APP_NS}" "${POD}" -c mongod -- \
+              mongosh "mongodb://localhost:27017/admin" \
+              -u "${CLUSTER_ADMIN_USER}" -p "${CLUSTER_ADMIN_PASS}" \
+              --quiet --eval 'print(rs.isMaster().ismaster ? "primary" : "secondary")' \
+              2>/dev/null || echo "unknown")
+            echo "Pod ${POD}: ${ROLE}"
+            if [ "${ROLE}" = "secondary" ]; then
+              TARGET_POD="${POD}"
+              break
+            fi
+          done
+
+          if [ -z "${TARGET_POD}" ]; then
+            echo "ERROR: No secondary found in replica set ${REPLSET}"
+            exit 1
+          fi
+
+          QUIESCED_PVC="mongod-data-${TARGET_POD}"
+          echo "Quiescing secondary: ${TARGET_POD} (PVC: ${QUIESCED_PVC})"
+
+          # fsyncLock: flushes all pending writes to disk and halts new I/O.
+          # This guarantees a crash-free snapshot regardless of storage-level crash consistency.
+          kubectl exec -n "${APP_NS}" "${TARGET_POD}" -c mongod -- \
+            mongosh "mongodb://localhost:27017/admin" \
+            -u "${CLUSTER_ADMIN_USER}" -p "${CLUSTER_ADMIN_PASS}" \
+            --quiet \
+            --eval 'print("fsyncLock lockCount:", db.fsyncLock().lockCount.toString())'
+
+          # Label the pod so backupPosthook can find it without re-querying MongoDB.
+          kubectl label pod "${TARGET_POD}" -n "${APP_NS}" \
+            kasten.io/psmdb-fsync-locked=true --overwrite
+
+          # Label the PVC for visibility — note this label is set after PVC discovery,
+          # so it will NOT be present in the captured PVC spec in the restore point.
+          kubectl label pvc "${QUIESCED_PVC}" -n "${APP_NS}" \
+            kasten.io/psmdb-quiesced=true --overwrite
+
+          # Emit PVC name as a restore-point artifact — the authoritative restore identifier.
+          kando output quiescedPVC "${QUIESCED_PVC}"
+
+  backupPosthook:
+    phases:
+    - func: KubeTask
+      name: unquiesceSecondary
+      args:
+        namespace: kasten-io
+        image: michaelcourcy/kasten-tools:8.5.2
+        command:
+        - bash
+        - -o
+        - errexit
+        - -o
+        - pipefail
+        - -c
+        - |
+          APP_NS="{{ .Object.metadata.namespace }}"
+          CR_NAME="{{ .Object.metadata.name }}"
+          CRED_SECRET="${CR_NAME}-secrets"
+
+          CLUSTER_ADMIN_USER=$(kubectl get secret "${CRED_SECRET}" -n "${APP_NS}" \
+            -o jsonpath='{.data.MONGODB_CLUSTER_ADMIN_USER}' | base64 -d)
+          CLUSTER_ADMIN_PASS=$(kubectl get secret "${CRED_SECRET}" -n "${APP_NS}" \
+            -o jsonpath='{.data.MONGODB_CLUSTER_ADMIN_PASSWORD}' | base64 -d)
+
+          # || true: jsonpath '{.items[0]}' exits 1 on empty list; suppress to avoid errexit.
+          LOCKED_POD=$(kubectl get pod -n "${APP_NS}" \
+            -l kasten.io/psmdb-fsync-locked=true \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+
+          if [ -z "${LOCKED_POD}" ]; then
+            echo "WARNING: No pod with label kasten.io/psmdb-fsync-locked=true — nothing to unlock"
+            exit 0
+          fi
+
+          echo "Unlocking pod: ${LOCKED_POD}"
+          kubectl exec -n "${APP_NS}" "${LOCKED_POD}" -c mongod -- \
+            mongosh "mongodb://localhost:27017/admin" \
+            -u "${CLUSTER_ADMIN_USER}" -p "${CLUSTER_ADMIN_PASS}" \
+            --quiet \
+            --eval 'print("fsyncUnlock lockCount:", db.fsyncUnlock().lockCount.toString())'
+
+          kubectl label pod "${LOCKED_POD}" -n "${APP_NS}" kasten.io/psmdb-fsync-locked-
+          echo "Pod ${LOCKED_POD} unlocked"

@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cb-example-keeper
+  namespace: couchbase-test
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: ebs-sc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cb-example-keeper
+  namespace: couchbase-test
+  labels:
+    app: cb-example-keeper
+    couchbase-keeper: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cb-example-keeper
+  template:
+    metadata:
+      labels:
+        app: cb-example-keeper
+        couchbase-keeper: "true"
+    spec:
+      containers:
+      - name: couchbase-backup
+        image: couchbase/server:7.6.6
+        command: ["/bin/bash", "-c", "sleep infinity"]
+        env:
+        - name: USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: cb-example-auth
+              key: username
+        - name: PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: cb-example-auth
+              key: password
+        - name: CLUSTER
+          value: "couchbase://cb-example.couchbase-test.svc.cluster.local"
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        volumeMounts:
+        - name: backup
+          mountPath: /backup
+      volumes:
+      - name: backup
+        persistentVolumeClaim:
+          claimName: cb-example-keeper

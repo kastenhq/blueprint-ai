@@ -1,0 +1,154 @@
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: couchbase-blueprint
+  namespace: kasten-io
+actions:
+  backupPrehook:
+    phases:
+    - func: KubeExec
+      name: cbBackup
+      args:
+        namespace: "{{ .Deployment.Namespace }}"
+        pod: "{{ index .Deployment.Pods 0 }}"
+        container: couchbase-backup
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          ARCHIVE=/backup/data
+          REPO=kasten-repo
+
+          echo "=== Couchbase backup pre-hook ==="
+          echo "Cluster: $CLUSTER"
+
+          mkdir -p "$ARCHIVE"
+
+          # Create backup repo on first run
+          if [ ! -d "$ARCHIVE/$REPO" ]; then
+            echo "Creating backup repo $REPO ..."
+            /opt/couchbase/bin/cbbackupmgr config \
+              --archive "$ARCHIVE" \
+              --repo "$REPO"
+          fi
+
+          echo "Running cbbackupmgr backup ..."
+          /opt/couchbase/bin/cbbackupmgr backup \
+            --archive "$ARCHIVE" \
+            --repo "$REPO" \
+            --cluster "$CLUSTER" \
+            --username "$USERNAME" \
+            --password "$PASSWORD"
+
+          echo "Backup completed successfully."
+
+          # Flush OS page cache to disk so the EBS snapshot captures fully-written data.
+          # Without this, cbbackupmgr .rift index files may be incomplete in the snapshot.
+          sync
+
+  backupPosthook:
+    phases:
+    - func: KubeExec
+      name: cbVerify
+      args:
+        namespace: "{{ .Deployment.Namespace }}"
+        pod: "{{ index .Deployment.Pods 0 }}"
+        container: couchbase-backup
+        command:
+        - /bin/bash
+        - -c
+        - |
+          echo "=== Couchbase backup post-hook: verifying backup ==="
+          /opt/couchbase/bin/cbbackupmgr info \
+            --archive /backup/data \
+            --repo kasten-repo
+          echo "Backup verification done."
+
+  restorePosthook:
+    phases:
+    - func: KubeTask
+      name: resumeCluster
+      args:
+        namespace: kasten-io
+        image: michaelcourcy/kasten-tools:8.5.2
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          NAMESPACE="{{ .Object.metadata.namespace }}"
+          KEEPER_NAME="{{ .Deployment.Name }}"
+          CLUSTER_NAME="${KEEPER_NAME%-keeper}"
+
+          echo "=== Couchbase restore post-hook: resuming cluster $CLUSTER_NAME ==="
+          kubectl patch couchbasecluster "$CLUSTER_NAME" -n "$NAMESPACE" \
+            --type=merge \
+            -p '{"spec":{"paused":false}}'
+
+          echo "Waiting for CouchbaseCluster to become Available ..."
+          for i in $(seq 1 60); do
+            STATUS=$(kubectl get couchbasecluster "$CLUSTER_NAME" -n "$NAMESPACE" \
+              -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
+            echo "  Attempt $i/60: Available=$STATUS"
+            if [ "$STATUS" = "True" ]; then
+              echo "Cluster is Available."
+              break
+            fi
+            sleep 10
+          done
+          if [ "$STATUS" != "True" ]; then
+            echo "ERROR: Cluster did not become Available within 10 minutes."
+            exit 1
+          fi
+
+    - func: KubeExec
+      name: cbRestore
+      args:
+        namespace: "{{ .Deployment.Namespace }}"
+        pod: "{{ index .Deployment.Pods 0 }}"
+        container: couchbase-backup
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          ARCHIVE=/backup/data
+          REPO=kasten-repo
+
+          echo "=== Couchbase restore post-hook: restoring data ==="
+          echo "Cluster: $CLUSTER"
+
+          # The CouchbaseCluster status transitions to Available before the node is fully
+          # ready to accept client connections. Wait for the REST API to respond before
+          # attempting cbbackupmgr restore.
+          echo "Waiting for Couchbase REST API to be ready ..."
+          for i in $(seq 1 30); do
+            if curl -sf -u "$USERNAME:$PASSWORD" \
+                "http://$(echo $CLUSTER | sed 's|couchbase://||'):8091/pools/default" \
+                -o /dev/null 2>/dev/null; then
+              echo "  Attempt $i/30: REST API is ready."
+              break
+            fi
+            echo "  Attempt $i/30: not ready yet, waiting 10s ..."
+            sleep 10
+          done
+
+          # Remove any stale lockfile and temp dir left by a previous process.
+          # cbbackupmgr writes lock.lk and .tmp/<pid>-<token>/ at archive root.
+          # After a pod restart the lock is always stale and must be cleared.
+          echo "Clearing stale archive locks ..."
+          rm -f "${ARCHIVE}/lock.lk"
+          rm -rf "${ARCHIVE}/.tmp"
+
+          /opt/couchbase/bin/cbbackupmgr restore \
+            --archive "$ARCHIVE" \
+            --repo "$REPO" \
+            --cluster "$CLUSTER" \
+            --username "$USERNAME" \
+            --password "$PASSWORD" \
+            --force-updates \
+            --restore-partial-backups \
+            --purge
+
+          echo "Restore completed successfully."

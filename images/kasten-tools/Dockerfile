@@ -1,0 +1,28 @@
+# kasten-tools — kanister-tools + kubectl + jq
+#
+# Base: gcr.io/kasten-images/kanister-tools (Kasten's standard tool image, RHEL-based)
+# Added: kubectl (cross-namespace cluster operations)
+#        jq (JSON parsing of API responses)
+#        tar, gzip (already present in base — re-stated for clarity)
+#
+# Used by KubeTask phases in blueprints that need to run kubectl commands
+# against the cluster. KubeTask pods using this image MUST run in the
+# kasten-io namespace so they inherit the Kasten service account, which
+# has the RBAC permissions to manage resources across all namespaces.
+#
+# Published as: ghcr.io/kastenhq/blueprint-ai/kasten-tools:<kasten-version>
+
+ARG KASTEN_VERSION=8.5.2
+FROM gcr.io/kasten-images/kanister-tools:${KASTEN_VERSION}
+
+ARG KUBECTL_VERSION=1.32.0
+ARG TARGETARCH
+
+USER root
+RUN microdnf install -y tar gzip jq && microdnf clean all \
+    && curl -LO "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${TARGETARCH}/kubectl" \
+    && install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl \
+    && rm kubectl
+USER 1001
+
+ENTRYPOINT ["/bin/sh"]

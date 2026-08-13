@@ -1,0 +1,25 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: BlueprintBinding
+metadata:
+  name: cnpg-blueprint-binding
+  namespace: kasten-io
+spec:
+  blueprintRef:
+    name: cnpg-blueprint
+    namespace: kasten-io
+  resources:
+    matchAll:
+      - type:
+          operator: In
+          values:
+            - group: postgresql.cnpg.io
+              resource: clusters
+      - annotations:
+          key: kanister.kasten.io/blueprint
+          operator: DoesNotExist
+      - labels:
+          key: cnpg-backup-pattern
+          operator: NotIn
+          values:
+            - barman-minio         # cnpg-barman (in-tree barman-cloud, deprecated)
+            - barman-cloud-plugin  # cnpg-barman-cloud (Barman Cloud Plugin)
