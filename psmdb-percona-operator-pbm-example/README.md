@@ -5,9 +5,9 @@ Kasten blueprint for **sharded** Percona Server for MongoDB (PSMDB) clusters tha
 PVC (which contains the full pbm archive), while pbm handles consistent cross-shard backup
 and restore.
 
-## Why this blueprint instead of [psmdb-percona-operator](../psmdb-percona-operator/)
+## Why this blueprint instead of [psmdb-percona-operator-example](../psmdb-percona-operator-example/)
 
-The [psmdb-percona-operator](../psmdb-percona-operator/) blueprint (Pattern 1 — quiesce a replica)
+The [psmdb-percona-operator-example](../psmdb-percona-operator-example/) blueprint (Pattern 1 — quiesce a replica)
 targets **unsharded** replica sets. Extending it to sharded clusters is prohibitively complex:
 you would need to quiesce every shard's secondary simultaneously, track multiple PVC names, and
 exclude the non-quiesced PVCs from each shard at restore time.

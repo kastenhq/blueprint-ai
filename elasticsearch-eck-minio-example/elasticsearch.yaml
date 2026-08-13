@@ -4,7 +4,7 @@ metadata:
   name: es-cluster
   namespace: elasticsearch-eck-minio
   labels:
-    # Excludes this CR from the elasticsearch-eck/blueprintbinding.yaml
+    # Excludes this CR from the elasticsearch-eck-example/blueprintbinding.yaml
     # (Pattern 3) so only the MinIO-keeper blueprint runs for it.
     es-backup-pattern: minio-keeper
 spec:

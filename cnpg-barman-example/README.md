@@ -7,12 +7,12 @@ Kasten blueprint for CloudNativePG clusters that use **barman-cloud WAL archivin
 > deprecated and will be **fully removed in CNPG 1.30.0**. This blueprint targets CNPG ≤ 1.29.x.
 >
 > Two successors exist:
-> - **[cnpg-barman-cloud/](../cnpg-barman-cloud/)** — the **same Pattern 5 / MinIO-keeper design as this
+> - **[cnpg-barman-cloud-example/](../cnpg-barman-cloud-example/)** — the **same Pattern 5 / MinIO-keeper design as this
 >   blueprint, upgraded to the [Barman Cloud Plugin](https://cloudnative-pg.io/plugin-barman-cloud/)**
 >   (CNPG-I: `ObjectStore` CR + `spec.plugins` + `Backup` with `method: plugin`). This is the
 >   recommended migration target if you want to keep barman-based PITR on a local MinIO keeper.
 >   Requires CNPG ≥ 1.26 and cert-manager.
-> - **[cnpg/](../cnpg/)** — Pattern 1 (fence and quiesce a replica), no barman at all; choose this if
+> - **[cnpg-example/](../cnpg-example/)** — Pattern 1 (fence and quiesce a replica), no barman at all; choose this if
 >   crash-consistent PVC snapshots are sufficient and you want to drop barman entirely.
 
 ## Versions
@@ -95,7 +95,7 @@ The goal is to give Kasten full ownership of data protection while keeping barma
 
 The BlueprintBinding targets Deployments labelled `cnpg-barman-minio: "true"`. The MinIO Deployment name must follow the convention `<cluster-name>-minio` — the blueprint derives the CNPG cluster name by stripping the `-minio` suffix.
 
-The CNPG Cluster must carry the label `cnpg-backup-pattern: barman-minio`, which prevents the [cnpg-blueprint-binding](../cnpg/blueprintbinding.yaml) (Pattern 1) from also binding to it.
+The CNPG Cluster must carry the label `cnpg-backup-pattern: barman-minio`, which prevents the [cnpg-blueprint-binding](../cnpg-example/blueprintbinding.yaml) (Pattern 1) from also binding to it.
 
 ## Blueprint actions
 
@@ -114,7 +114,7 @@ No restore hooks are implemented — PITR recovery is a **manual procedure** usi
 - `michaelcourcy/kasten-tools:8.5.2` image available (adds `kubectl` to `gcr.io/kasten-images/kanister-tools:8.5.2`).
 - Blueprint and BlueprintBinding deployed in `kasten-io` namespace.
 - Kasten backup policy configured with the PVC filter described below.
-- The Pattern 1 `cnpg-blueprint-binding` must have the `NotIn: barman-minio` exclusion condition (already present in `cnpg/blueprintbinding.yaml`).
+- The Pattern 1 `cnpg-blueprint-binding` must have the `NotIn: barman-minio` exclusion condition (already present in `cnpg-example/blueprintbinding.yaml`).
 
 ## Deploying the workload
 
@@ -192,7 +192,7 @@ kubectl exec -n cnpg-barman "$PRIMARY" -- psql -U postgres -d kasten_test -c "
 ### 6. Deploy the blueprint and BlueprintBinding
 
 ```bash
-kubectl apply -f ../cnpg/blueprintbinding.yaml   # ensure NotIn: barman-minio exclusion is present
+kubectl apply -f ../cnpg-example/blueprintbinding.yaml   # ensure NotIn: barman-minio exclusion is present
 kubectl apply -f blueprint.yaml -n kasten-io
 kubectl apply -f blueprintbinding.yaml -n kasten-io
 ```

@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "ocp-etcd-backup/images/ocp-etcd-backup/**"
+      - "ocp-etcd-backup-example/images/ocp-etcd-backup/**"
   push:
     branches:
       - main
     paths:
-      - "ocp-etcd-backup/images/ocp-etcd-backup/**"
+      - "ocp-etcd-backup-example/images/ocp-etcd-backup/**"
 
 env:
   REGISTRY: ghcr.io
@@ -29,7 +29,7 @@ jobs:
         id: versions
         run: |
           # Use the etcd source image tag as the version identifier
-          etcd_tag=$(grep -oP '(?<=ARG ETCD_SOURCE_IMAGE=quay.io/coreos/etcd:)\S+' ocp-etcd-backup/images/ocp-etcd-backup/Dockerfile)
+          etcd_tag=$(grep -oP '(?<=ARG ETCD_SOURCE_IMAGE=quay.io/coreos/etcd:)\S+' ocp-etcd-backup-example/images/ocp-etcd-backup/Dockerfile)
           echo "etcd_tag=${etcd_tag}" >> "$GITHUB_OUTPUT"
 
       - name: Extract Docker metadata
@@ -59,7 +59,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@2cdde995de11925a030ce8070c3d77a52ffcf1c0 # v5.3.0
         with:
-          context: ocp-etcd-backup/images/ocp-etcd-backup
+          context: ocp-etcd-backup-example/images/ocp-etcd-backup
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}

@@ -524,7 +524,7 @@ the PVC will be included in the restore point.
 ### 1. Fence and Quiesce Replica
 
 - **Principle**: Fence (halt) replication synchronization and quiesce a replica to take a backup of the application volumes.
-- **Example**: [cnpg](./cnpg/)
+- **Example**: [cnpg-example](./cnpg-example/)
 - **Pro**: No impact on the primary, because only a replica is quiesced.
 - **Cons**: At restore time, the operator must be able to promote the replica to primary, or you have to manually reconfigure your workload.
 - **BlueprintBinding**: Yes — attach to the workload CR.
@@ -533,7 +533,7 @@ the PVC will be included in the restore point.
 ### 2. Quiesce
 
 - **Principle**: Ensure that data is flushed to disk using a database primitive and that all transactions are persisted on the volumes before backing them up.
-- **Example**: [mariadb-community-operator-standalone](./mariadb-community-operator-standalone/), [MongoDB](https://docs.kasten.io/latest/kanister/mongodb/install_app_cons) or [PostgreSQL](https://docs.kasten.io/latest/kanister/postgresql/install_app_cons)
+- **Example**: [mariadb-community-operator-standalone-example](./mariadb-community-operator-standalone-example/), [MongoDB](https://docs.kasten.io/latest/kanister/mongodb/install_app_cons) or [PostgreSQL](https://docs.kasten.io/latest/kanister/postgresql/install_app_cons)
 - **Pro**: Backup is incremental and backup time remains constant as the database grows (unlike a dump strategy).
 - **Cons**: When restoring database volumes you cannot be granular (for example, restore only one database or specific tables/collections).
 - **BlueprintBinding**: Yes — attach to the workload CR.
@@ -542,7 +542,7 @@ the PVC will be included in the restore point.
 ### 3. Database Snapshot on Permanent Workload PVC (PVC Mounted by Workload)
 
 - **Principle**: The workload is configured to mount a permanent backup PVC. The `backupPrehook` runs the database snapshot tool through `KubeExec` into the workload pod (or a sidecar). The PVC is pre-existing when Kasten runs its discovery pass.
-- **Example**: [elasticsearch-eck](./elasticsearch-eck/)
+- **Example**: [elasticsearch-eck-example](./elasticsearch-eck-example/)
 - **Pro**: Database snapshot allows efficient incrementality by appending files at each snapshot. BlueprintBinding works because the PVC is discovered through the workload's ownership chain.
 - **Cons**: Requires changing the workload configuration to mount the backup PVC.
 - **BlueprintBinding**: Yes — attach to the workload CR.
@@ -551,7 +551,7 @@ the PVC will be included in the restore point.
 ### 4. Database Dump or Snapshot on Permanent Keeper PVC (PVC Mounted by Keeper)
 
 - **Principle**: A dedicated keeper Deployment mounts the backup PVC permanently and runs the backup tool image (for example, the database server image that includes the backup tool). The `backupPrehook` uses `KubeExec` into the keeper pod to write the dump or snapshot to the PVC. Kasten discovers the PVC through the keeper Deployment's ownership chain.
-- **Example**: [couchbase-operator](./couchbase-operator/)
+- **Example**: [couchbase-operator-example](./couchbase-operator-example/)
 - **Pro**: No change to the main workload configuration. PVC is always discovered because the keeper keeps it mounted. `KubeExec` avoids temporary pod lifecycle management. BlueprintBinding attaches to the keeper Deployment.
 - **Cons**: Requires deploying an extra Deployment alongside the workload. The keeper image must include the backup tool (for example, `couchbase/server:<version>` for `cbbackupmgr`).
 - **BlueprintBinding**: Yes — attach to the keeper Deployment using a generic component label (for example, `couchbase-keeper: "true"`) so one binding covers multiple keepers in the same namespace.
@@ -592,7 +592,7 @@ these conventions:
   `backupPrehook` triggers the workload's native backup to point at the local MinIO service
   (`http://<minio-svc>:9000`). After Kasten snapshots the MinIO PVC, `restorePosthook` triggers
   the workload to restore from it.
-- **Example**: [cnpg-barman](./cnpg-barman/)
+- **Example**: [cnpg-barman-example](./cnpg-barman-example/)
 - **Pro**: No custom dump image needed — MinIO is the off-the-shelf keeper image. The workload's
   existing S3-protocol backup mechanism is reused as-is. BlueprintBinding works because MinIO's
   PVC is permanent. Incremental if the workload's S3 tool supports it (for example, wal-g, pgBackRest

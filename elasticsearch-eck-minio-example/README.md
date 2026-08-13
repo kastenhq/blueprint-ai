@@ -6,7 +6,7 @@ Kasten snapshots the MinIO PVC, capturing the full ES snapshot archive in each
 restore point.
 
 This blueprint is the **Pattern 5 alternative** to the existing
-[`elasticsearch-eck/`](../elasticsearch-eck/) blueprint (Pattern 3 — permanent
+[`elasticsearch-eck-example/`](../elasticsearch-eck-example/) blueprint (Pattern 3 — permanent
 workload PVC with shared filesystem repository). Use this one when:
 
 - You don't want to mount an RWX repository PVC across all ES nodes.
@@ -71,7 +71,7 @@ workload PVC with shared filesystem repository). Use this one when:
 
 ## Snapshot lifecycle (no per-backup cleanup)
 
-Unlike [`elasticsearch-eck/`](../elasticsearch-eck/), this blueprint **never
+Unlike [`elasticsearch-eck-example/`](../elasticsearch-eck-example/), this blueprint **never
 deletes Elasticsearch snapshots during a backup run**. Each backup creates a
 new ES snapshot with a unique name; the snapshot's identity is stored as a
 Kanister artifact alongside the Kasten restore point. When Kasten retires the
@@ -196,7 +196,7 @@ The BlueprintBinding matches any `Deployment` carrying the label
 `minio-s3-keeper=true` that does **not** already have a
 `kanister.kasten.io/blueprint` annotation — so any other keeper Deployment
 intended for a non-Elasticsearch S3-protocol workload (e.g.
-[`cnpg-barman/`](../cnpg-barman/) uses its own label `cnpg-barman-minio`)
+[`cnpg-barman-example/`](../cnpg-barman-example/) uses its own label `cnpg-barman-minio`)
 is unaffected.
 
 Then create the Kasten backup policy. The policy needs:

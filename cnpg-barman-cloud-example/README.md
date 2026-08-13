@@ -5,12 +5,12 @@ instance via the [Barman Cloud Plugin](https://cloudnative-pg.io/plugin-barman-c
 Kasten snapshots the MinIO PVC (which contains the full barman archive), enabling Point-In-Time
 Recovery (PITR) from any Kasten restore point.
 
-This is the **plugin-based successor** to [../cnpg-barman/](../cnpg-barman/), which used the
+This is the **plugin-based successor** to [../cnpg-barman-example/](../cnpg-barman-example/), which used the
 **in-tree** barman-cloud integration (`spec.backup.barmanObjectStore` + `Backup` with
 `method: barmanObjectStore`). That in-tree integration is deprecated and will be removed in CNPG
 1.30.0. The design and Kasten integration here are identical — only the CNPG-side syntax changed:
 
-| Concern | in-tree (`cnpg-barman/`) | plugin (this folder) |
+| Concern | in-tree (`cnpg-barman-example/`) | plugin (this folder) |
 |---|---|---|
 | Object-store config | `spec.backup.barmanObjectStore` on the Cluster | dedicated `ObjectStore` CR (`barmancloud.cnpg.io/v1`) |
 | WAL archiving | built into the operator | `spec.plugins[barman-cloud.cloudnative-pg.io]` + injected sidecar |
@@ -121,7 +121,7 @@ Deployment name must follow the convention `<cluster-name>-minio` — the bluepr
 cluster name by stripping the `-minio` suffix.
 
 The CNPG Cluster carries the label `cnpg-backup-pattern: barman-cloud-plugin`, which prevents the
-[cnpg-blueprint-binding](../cnpg/blueprintbinding.yaml) (Pattern 1) from also binding to it.
+[cnpg-blueprint-binding](../cnpg-example/blueprintbinding.yaml) (Pattern 1) from also binding to it.
 
 ## Blueprint actions
 
@@ -155,7 +155,7 @@ cluster manifest (see [PITR Recovery Procedure](#pitr-recovery-procedure) below)
 - Blueprint and BlueprintBinding deployed in `kasten-io`.
 - Kasten backup policy configured with the PVC filter described below.
 - The Pattern 1 `cnpg-blueprint-binding` must list `barman-cloud-plugin` in its `NotIn` exclusion
-  (already present in [../cnpg/blueprintbinding.yaml](../cnpg/blueprintbinding.yaml)).
+  (already present in [../cnpg-example/blueprintbinding.yaml](../cnpg-example/blueprintbinding.yaml)).
 
 ## Deploying the workload
 
@@ -250,7 +250,7 @@ kubectl exec -n cnpg-barman-cloud "$PRIMARY" -c postgres -- psql -U postgres -d 
 ### 7. Deploy the blueprint and BlueprintBinding
 
 ```bash
-kubectl apply -f ../cnpg/blueprintbinding.yaml   # ensure barman-cloud-plugin is in the NotIn list
+kubectl apply -f ../cnpg-example/blueprintbinding.yaml   # ensure barman-cloud-plugin is in the NotIn list
 kubectl apply -f blueprint.yaml -n kasten-io
 kubectl apply -f blueprintbinding.yaml -n kasten-io
 ```
