@@ -124,7 +124,7 @@ helm upgrade --install psmdb-operator percona/psmdb-operator \
 
 ### Custom tool image
 
-The blueprint uses `michaelcourcy/kasten-tools:8.5.2`, which adds `kubectl` to
+The blueprint uses `ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2`, which adds `kubectl` to
 `gcr.io/kasten-images/kanister-tools:8.5.2` (the base image ships without `kubectl`).
 KubeTask phases that call `kubectl` must run in the `kasten-io` namespace for RBAC.
 

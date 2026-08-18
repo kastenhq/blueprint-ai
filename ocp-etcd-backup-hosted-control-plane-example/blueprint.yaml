@@ -1,0 +1,228 @@
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: hcp-etcd-backup
+  namespace: kasten-io
+# Hosted Control Plane (HCP) FLEET etcd backup — Pattern 4 (dump on a permanent
+# Keeper PVC).
+#
+# ONE keeper Deployment in the HostedCluster namespace (`clusters`) backs up EVERY
+# hosted cluster in that namespace. The blueprint binds to the keeper Deployment;
+# backupPrehook KubeExec's into the keeper, which loops over all HostedClusters in
+# its OWN namespace — that is the `clusters` namespace where HostedCluster objects
+# live, NOT a per-guest `clusters-<name>` namespace (POD_NAMESPACE from the downward
+# API = the keeper's namespace = `clusters`). For each guest it runs the documented
+# `etcdctl snapshot save` inside a running hosted etcd pod (pods etcd-0/1/2, container
+# `etcd`, in the per-guest CONTROL-PLANE namespace `<hostedcluster-namespace>-<name>`,
+# e.g. `clusters-<name>`), then streams the .db out to /backup/<name>/snapshot.db.
+#
+# Kasten snapshots the single keeper PVC — the PVC snapshot IS the restore point
+# and holds one snapshot.db per guest. Adding a new guest needs NO extra setup:
+# the loop picks it up on the next policy run.
+#
+# Error policy: BEST-EFFORT with a FAILING SUMMARY. Every reachable guest is
+# snapshotted; per-guest failures are logged and the action exits non-zero at the
+# end if ANY guest failed, so the failure surfaces in the customer's monitoring
+# while the healthy guests' snapshots still land on the PVC.
+#
+# No restore action (disruptive, manual — see README) and no delete action (the
+# PVC snapshot is the only copy).
+actions:
+  backupPrehook:
+    phases:
+    - func: KubeExec
+      name: hcpFleetEtcdBackup
+      args:
+        namespace: "{{ .Deployment.Namespace }}"
+        pod: "{{ index .Deployment.Pods 0 }}"
+        container: keeper
+        command:
+        - /bin/bash
+        - -c
+        - |
+          # NOTE: intentionally NOT using `set -e` — this is a best-effort loop
+          # over the fleet; a single guest's failure must not abort the others.
+          set -uo pipefail
+
+          HCNS="${POD_NAMESPACE:?POD_NAMESPACE not set (downward API) on keeper}"
+          BACKUP_ROOT=/backup
+
+          echo "=== HCP fleet etcd backup pre-hook ==="
+          echo "HostedCluster namespace (keeper namespace): ${HCNS}"
+
+          # All HostedClusters in the keeper's own namespace (= `clusters`, where
+          # HostedCluster objects live; POD_NAMESPACE = the keeper pod's namespace).
+          HCS=$(kubectl get hostedcluster -n "${HCNS}" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+          if [ -z "${HCS}" ]; then
+            echo "No HostedCluster found in ${HCNS}. Nothing to back up."
+            exit 0
+          fi
+          echo "HostedClusters found:"; echo "${HCS}" | sed 's/^/  - /'
+
+          declare -a OK_LIST=() FAIL_LIST=()
+
+          backup_one() {
+            local hc="$1"
+            local cpns="${HCNS}-${hc}"
+            local dir="${BACKUP_ROOT}/${hc}"
+            local snap="${dir}/snapshot.db"
+            echo "----------------------------------------------------------------"
+            echo "[${hc}] control-plane namespace: ${cpns}"
+
+            local avail prog
+            avail=$(kubectl get hostedcluster "${hc}" -n "${HCNS}" \
+              -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null)
+            prog=$(kubectl get hostedcluster "${hc}" -n "${HCNS}" \
+              -o jsonpath='{.status.conditions[?(@.type=="Progressing")].status}' 2>/dev/null)
+            echo "[${hc}] Available=${avail:-<unknown>} Progressing=${prog:-<unknown>}"
+            if [ "${avail}" != "True" ]; then
+              echo "[${hc}] ERROR: HostedCluster not Available. Skipping."; return 1
+            fi
+            if [ "${prog}" = "True" ]; then
+              echo "[${hc}] ERROR: HostedCluster is Progressing (rollout in flight). Skipping."; return 1
+            fi
+
+            local ready desired
+            ready=$(kubectl get statefulset etcd -n "${cpns}" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)
+            desired=$(kubectl get statefulset etcd -n "${cpns}" -o jsonpath='{.spec.replicas}' 2>/dev/null)
+            echo "[${hc}] etcd StatefulSet readiness: ${ready:-0}/${desired:-?}"
+            if [ -z "${ready}" ] || [ "${ready}" != "${desired}" ]; then
+              echo "[${hc}] ERROR: etcd StatefulSet not fully ready. Skipping."; return 1
+            fi
+
+            local pod
+            pod=$(kubectl get pods -n "${cpns}" -l app=etcd \
+              --field-selector=status.phase=Running \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+            if [ -z "${pod}" ]; then
+              echo "[${hc}] ERROR: no Running etcd pod in ${cpns}. Skipping."; return 1
+            fi
+            echo "[${hc}] taking snapshot from etcd pod: ${pod}"
+
+            # Idempotent: clean this guest's dir so it holds exactly one snapshot.
+            rm -rf "${dir}"; mkdir -p "${dir}"
+
+            # Documented procedure: etcdctl snapshot save against localhost:2379
+            # using the etcd pod's own client certs, written inside the pod.
+            if ! kubectl exec -n "${cpns}" -c etcd "${pod}" -- \
+                env ETCDCTL_API=3 /usr/bin/etcdctl \
+                --cacert /etc/etcd/tls/etcd-ca/ca.crt \
+                --cert /etc/etcd/tls/client/etcd-client.crt \
+                --key /etc/etcd/tls/client/etcd-client.key \
+                --endpoints=https://localhost:2379 \
+                snapshot save /var/lib/snapshot.db; then
+              echo "[${hc}] ERROR: etcdctl snapshot save failed."; return 1
+            fi
+
+            # Stream the .db out to the keeper PVC. No `-t`: TTY would corrupt the
+            # binary stream. The path carries the cluster name (no PVC contention:
+            # all writes are sequential in this single keeper pod).
+            if ! kubectl exec -n "${cpns}" -c etcd "${pod}" -- cat /var/lib/snapshot.db > "${snap}"; then
+              echo "[${hc}] ERROR: streaming snapshot out failed."
+              kubectl exec -n "${cpns}" -c etcd "${pod}" -- rm -f /var/lib/snapshot.db 2>/dev/null || true
+              return 1
+            fi
+            kubectl exec -n "${cpns}" -c etcd "${pod}" -- rm -f /var/lib/snapshot.db 2>/dev/null || true
+
+            if [ ! -s "${snap}" ]; then
+              echo "[${hc}] ERROR: snapshot.db is empty."; return 1
+            fi
+            echo "[${hc}] snapshot size: $(du -h "${snap}" | cut -f1)"
+            if ! etcdutl snapshot status "${snap}" -w table; then
+              echo "[${hc}] ERROR: etcdutl snapshot status failed (corrupt snapshot)."; return 1
+            fi
+            echo "[${hc}] OK"
+            return 0
+          }
+
+          while IFS= read -r hc; do
+            [ -z "${hc}" ] && continue
+            if backup_one "${hc}"; then OK_LIST+=("${hc}"); else FAIL_LIST+=("${hc}"); fi
+          done <<< "${HCS}"
+
+          # Prune stale per-guest dirs so the PVC mirrors the live fleet. The
+          # PREVIOUS restore point still holds any removed guest's old snapshot.
+          echo "----------------------------------------------------------------"
+          echo "Pruning stale backup directories ..."
+          for d in "${BACKUP_ROOT}"/*/; do
+            [ -d "${d}" ] || continue
+            name=$(basename "${d}")
+            # lost+found is a filesystem artifact on the PVC, not a guest dir.
+            [ "${name}" = "lost+found" ] && continue
+            if ! echo "${HCS}" | grep -qx "${name}"; then
+              echo "  removing stale ${name} (no such HostedCluster)"
+              rm -rf "${d}"
+            fi
+          done
+
+          # Flush to disk before Kasten takes the PVC snapshot.
+          sync
+
+          echo "================================================================"
+          echo "Backup summary: ${#OK_LIST[@]} succeeded, ${#FAIL_LIST[@]} failed."
+          [ ${#OK_LIST[@]} -gt 0 ]   && echo "  OK:   ${OK_LIST[*]}"
+          [ ${#FAIL_LIST[@]} -gt 0 ] && echo "  FAIL: ${FAIL_LIST[*]}"
+          if [ ${#FAIL_LIST[@]} -gt 0 ]; then
+            echo "One or more hosted clusters FAILED — failing the action so it surfaces"
+            echo "in monitoring. Healthy guests' snapshots are still on the PVC."
+            exit 1
+          fi
+          echo "All hosted clusters backed up successfully."
+
+  backupPosthook:
+    phases:
+    - func: KubeExec
+      name: hcpFleetEtcdVerify
+      args:
+        namespace: "{{ .Deployment.Namespace }}"
+        pod: "{{ index .Deployment.Pods 0 }}"
+        container: keeper
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -uo pipefail
+          BACKUP_ROOT=/backup
+
+          echo "=== HCP fleet etcd backup post-hook: verifying snapshots on the PVC ==="
+          count=0; bad=0
+          for d in "${BACKUP_ROOT}"/*/; do
+            [ -d "${d}" ] || continue
+            name=$(basename "${d}")
+            # lost+found is a filesystem artifact on a freshly-formatted PVC, not a
+            # guest dir — skip it (same guard as the prune loop in backupPrehook).
+            [ "${name}" = "lost+found" ] && continue
+            snap="${d}snapshot.db"
+            if [ ! -s "${snap}" ]; then
+              echo "[${name}] ERROR: missing/empty snapshot.db"; bad=$((bad+1)); continue
+            fi
+            echo "[${name}] $(du -h "${snap}" | cut -f1)"
+            if ! etcdutl snapshot status "${snap}" -w table; then
+              echo "[${name}] ERROR: snapshot.db failed verification"; bad=$((bad+1)); continue
+            fi
+            count=$((count+1))
+          done
+
+          echo "----------------------------------------------------------------"
+          echo "Verified ${count} snapshot(s); ${bad} invalid."
+          if [ "${count}" -eq 0 ]; then
+            echo "ERROR: no valid snapshot found on the PVC."; exit 1
+          fi
+          if [ "${bad}" -gt 0 ]; then
+            echo "ERROR: ${bad} snapshot(s) failed verification."; exit 1
+          fi
+          echo "HCP fleet etcd backup post-hook verification passed."
+
+  # NOTE: there is intentionally NO restore action.
+  #
+  # Re-injecting an etcd snapshot into a hosted cluster is the disruptive,
+  # documented manual procedure (pause reconciliation, scale the etcd StatefulSet
+  # to 0, `etcdutl snapshot restore` into data-etcd-0, scale up, roll out the
+  # HostedCluster). It must NEVER run from a Kasten hook. When Kasten restores the
+  # `clusters` namespace it brings the keeper PVC back with every guest's
+  # snapshot.db on it; an admin then runs the documented recovery for the guest
+  # they need. See README.md.
+  #
+  # There is also intentionally NO delete action: deleting the Kasten restore point
+  # deletes the underlying PVC snapshot, which is the only copy of the backup data.

@@ -107,21 +107,27 @@ the restored PVC automatically.
 - mariadb-operator installed in the cluster (Helm chart `mariadb-operator/mariadb-operator`)
 - A Kubernetes Secret holding the MariaDB root password (created by the operator by default)
 - The blueprint and BlueprintBinding deployed in the `kasten-io` namespace
-- Custom image `michaelcourcy/kasten-tools:<kasten-version>` for `KubeTask` phases that need
+- Custom image `ghcr.io/kastenhq/blueprint-ai/kasten-tools:<kasten-version>` for `KubeTask` phases that need
   `kubectl` (the standard `gcr.io/kasten-images/kanister-tools` image does not include it).
-  Dockerfile: [`images/kasten-tools/Dockerfile`](images/kasten-tools/Dockerfile)
+  Dockerfile: [`../images/kasten-tools/Dockerfile`](../images/kasten-tools/Dockerfile)
 
 ## Custom images
 
 | Image | Base | Added | Dockerfile |
 |-------|------|-------|------------|
-| `michaelcourcy/kasten-tools:8.5.2` | `gcr.io/kasten-images/kanister-tools:8.5.2` | `kubectl` v1.32.0 | `images/kasten-tools/Dockerfile` |
+| `ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2` | `gcr.io/kasten-images/kanister-tools:8.5.2` | `kubectl` v1.32.0 | [`../images/kasten-tools/Dockerfile`](../images/kasten-tools/Dockerfile) |
 
 To rebuild for a different Kasten version:
 ```bash
-docker build --build-arg KASTEN_VERSION=<version> -t michaelcourcy/kasten-tools:<version> images/kasten-tools/
-docker push michaelcourcy/kasten-tools:<version>
+docker build --build-arg KASTEN_VERSION=<version> -t ghcr.io/kastenhq/blueprint-ai/kasten-tools:<version> ../images/kasten-tools/
+docker push ghcr.io/kastenhq/blueprint-ai/kasten-tools:<version>
 ```
+
+> `kasten-tools` is the **shared** tool image — its canonical Dockerfile lives at
+> [`../images/kasten-tools/`](../images/kasten-tools/) and is built by this repository's CI, so
+> pushing to `ghcr.io/kastenhq/blueprint-ai` will fail with `unauthorized`. Substitute your own
+> registry. See [`../images/kasten-tools/README.md`](../images/kasten-tools/README.md) for the
+> published tags and the air-gapped build instructions.
 
 ## Deploying the test workload
 
@@ -216,4 +222,4 @@ kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=mariadb-test
 | `operator/mariadb.yaml` | MariaDB CR for the test deployment |
 | `blueprint.yaml` | Kasten Blueprint |
 | `blueprintbinding.yaml` | BlueprintBinding targeting all MariaDB CRs |
-| `images/kasten-tools/Dockerfile` | Dockerfile for `michaelcourcy/kasten-tools` |
+| [`../images/kasten-tools/Dockerfile`](../images/kasten-tools/Dockerfile) | Dockerfile for `ghcr.io/kastenhq/blueprint-ai/kasten-tools` |

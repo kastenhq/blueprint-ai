@@ -1,18 +1,35 @@
-# kasten-tools — kanister-tools + kubectl + jq
+# kasten-tools — kanister-tools + kubectl + jq (shared tool image)
+#
+# This is the SINGLE canonical Dockerfile for the kasten-tools image reused by many
+# blueprints in this repo. Do not copy it into individual blueprint folders — that
+# reintroduces version drift. Reference this file from each blueprint README instead.
 #
 # Base: gcr.io/kasten-images/kanister-tools (Kasten's standard tool image, RHEL-based)
 # Added: kubectl (cross-namespace cluster operations)
-#        jq (JSON parsing of API responses)
+#        jq     (JSON parsing of database / HTTP API responses)
 #        tar, gzip (already present in base — re-stated for clarity)
+# The base already ships curl.
 #
-# Used by KubeTask phases in blueprints that need to run kubectl commands
-# against the cluster. KubeTask pods using this image MUST run in the
-# kasten-io namespace so they inherit the Kasten service account, which
-# has the RBAC permissions to manage resources across all namespaces.
+# KubeTask pods using this image MUST run in the kasten-io namespace so they inherit
+# the Kasten service account, which has cross-namespace RBAC.
 #
 # Published as: ghcr.io/kastenhq/blueprint-ai/kasten-tools:<kasten-version>
+# Built and pushed automatically by .github/workflows/kasten-tools-image.yaml, which
+# derives the published tag from ARG KASTEN_VERSION below.
+#
+# The image tag MUST match the Kasten version the blueprint was tested against
+# (detect with `helm ls -n kasten-io`). To build one tag yourself — for an air-gapped
+# cluster, or for a Kasten version this repo has not published:
+#
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     --build-arg KASTEN_VERSION=<kasten-version> \
+#     --build-arg KUBECTL_VERSION=<k8s-version> \
+#     -t <your-registry>/kasten-tools:<kasten-version> --push .
+#
+# Always pass --build-arg explicitly so the tag matches the target cluster; the ARG
+# defaults below only track the most recently tested version. See README.md.
 
-ARG KASTEN_VERSION=8.5.2
+ARG KASTEN_VERSION=8.5.13
 FROM gcr.io/kasten-images/kanister-tools:${KASTEN_VERSION}
 
 ARG KUBECTL_VERSION=1.32.0

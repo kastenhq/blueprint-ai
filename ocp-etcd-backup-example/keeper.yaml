@@ -97,7 +97,7 @@ spec:
         runAsGroup: 0
       containers:
         - name: keeper
-          image: michaelcourcy/ocp-etcd-backup:8.5.12
+          image: ghcr.io/kastenhq/blueprint-ai/ocp-etcd-backup:v3.5.18
           imagePullPolicy: Always
           command: ["/bin/bash", "-c"]
           args: ["echo 'ocp-etcd-backup keeper ready'; sleep infinity"]

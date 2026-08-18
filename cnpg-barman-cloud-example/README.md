@@ -151,7 +151,7 @@ cluster manifest (see [PITR Recovery Procedure](#pitr-recovery-procedure) below)
   kubectl apply -f https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/v0.13.0/manifest.yaml
   kubectl -n cnpg-system rollout status deploy/barman-cloud
   ```
-- `michaelcourcy/kasten-tools:8.5.2` image available (adds `kubectl` to `gcr.io/kasten-images/kanister-tools:8.5.2`).
+- `ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2` image available (adds `kubectl` to `gcr.io/kasten-images/kanister-tools:8.5.2`).
 - Blueprint and BlueprintBinding deployed in `kasten-io`.
 - Kasten backup policy configured with the PVC filter described below.
 - The Pattern 1 `cnpg-blueprint-binding` must list `barman-cloud-plugin` in its `NotIn` exclusion

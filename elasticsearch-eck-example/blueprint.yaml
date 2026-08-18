@@ -42,7 +42,7 @@ actions:
           # Run in app namespace: only curl calls to the ES service (no kubectl needed).
           # Avoids cross-namespace network policy issues.
           namespace: "{{ .Object.metadata.namespace }}"
-          image: michaelcourcy/kasten-tools:8.5.2
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2
           command:
             - bash
             - -c
@@ -110,7 +110,7 @@ actions:
             namespace: "{{ .Object.metadata.namespace }}"
         args:
           namespace: "{{ .Object.metadata.namespace }}"
-          image: michaelcourcy/kasten-tools:8.5.2
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2
           command:
             - bash
             - -c
@@ -140,7 +140,7 @@ actions:
         args:
           # Run in kasten-io: uses kubectl to remove the CR annotation.
           namespace: kasten-io
-          image: michaelcourcy/kasten-tools:8.5.2
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2
           command:
             - bash
             - -c
@@ -183,7 +183,7 @@ actions:
         args:
           # Run in app namespace: curl-only calls to the ES service, no kubectl.
           namespace: "{{ .Object.metadata.namespace }}"
-          image: michaelcourcy/kasten-tools:8.5.2
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2
           command:
             - bash
             - -c

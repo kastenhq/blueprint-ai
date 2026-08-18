@@ -1,0 +1,120 @@
+# Fleet keeper for HCP etcd backup.
+#
+# ONE keeper Deployment (+ ONE permanent PVC) lives in the HostedCluster namespace
+# (`clusters`) and backs up EVERY hosted cluster in that namespace. The blueprint
+# binds to this keeper Deployment; its backupPrehook loops over all HostedClusters
+# in the keeper's own namespace and writes one snapshot per guest to
+# /backup/<hostedcluster-name>/snapshot.db. Adding a new guest requires NO extra
+# setup — the loop picks it up on the next policy run.
+#
+# The keeper needs cluster-scoped read/exec because the control planes it snapshots
+# live in the DYNAMIC per-guest namespaces `<hcns>-<name>` (created/destroyed as
+# guests come and go), so a namespaced Role cannot cover them.
+#
+# NOTE: the target namespace is intentionally NOT set here. Deploy with Kustomize
+# (`oc apply -k .` — see kustomization.yaml and the README); its `namespace:`
+# transformer stamps metadata.namespace on the SA/PVC/Deployment AND rewrites the
+# ClusterRoleBinding subject namespace to match — the one line the customer edits.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hcp-etcd-backup-keeper
+---
+# Cluster-scoped so the keeper can reach every current and future hosted cluster:
+#   - hostedclusters: stability check (Available / not Progressing)
+#   - pods + pods/exec: find a running etcd pod and run `etcdctl snapshot save`
+#   - statefulsets: check etcd is fully ready
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hcp-etcd-backup-keeper
+rules:
+  - apiGroups: ["hypershift.openshift.io"]
+    resources: ["hostedclusters"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hcp-etcd-backup-keeper
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hcp-etcd-backup-keeper
+subjects:
+  - kind: ServiceAccount
+    name: hcp-etcd-backup-keeper
+    # namespace stamped by the Kustomize namespace transformer (see kustomization.yaml)
+---
+# Permanent backup PVC. Kasten snapshots THIS PVC; the snapshot is the restore
+# point. It holds one subdir per hosted cluster: /backup/<name>/snapshot.db.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hcp-etcd-backup
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: managed-csi
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hcp-etcd-backup-keeper
+  labels:
+    app: hcp-etcd-backup-keeper
+    hcp-etcd-backup-keeper: "true"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # RWO PVC: never two pods mounting it at once
+  selector:
+    matchLabels:
+      app: hcp-etcd-backup-keeper
+  template:
+    metadata:
+      labels:
+        app: hcp-etcd-backup-keeper
+        hcp-etcd-backup-keeper: "true"
+    spec:
+      serviceAccountName: hcp-etcd-backup-keeper
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: keeper
+          image: ghcr.io/kastenhq/blueprint-ai/hcp-etcd-backup:v3.5.18
+          imagePullPolicy: Always
+          # The keeper loops over HostedClusters in its OWN namespace; the
+          # downward API tells it which namespace that is. No per-cluster config.
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          command: ["/bin/bash", "-c"]
+          args: ["echo 'hcp-etcd-backup fleet keeper ready'; sleep infinity"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: backup
+              mountPath: /backup
+      volumes:
+        - name: backup
+          persistentVolumeClaim:
+            claimName: hcp-etcd-backup

@@ -68,8 +68,8 @@ control-plane node (master)
 │          │ hostPath, read-only                             │
 │          ▼                                                 │
 │   ┌──────────────────────────┐                            │
-│   │ keeper pod (Deployment)  │   image: michaelcourcy/    │
-│   │  - etcdctl / etcdutl     │          ocp-etcd-backup    │
+│   │ keeper pod (Deployment)  │   image: ocp-etcd-backup   │
+│   │  - etcdctl / etcdutl     │                            │
 │   │  - runs cluster-backup.sh│                            │
 │   │      → /backup           │──── writes snapshot ───┐    │
 │   └──────────────────────────┘                        │    │
@@ -97,7 +97,7 @@ control-plane node (master)
 | Kubernetes | `1.31.6` |
 | Kasten | `8.5.12` (detect with `helm ls -n kasten-io`) |
 | etcd (cluster) | `3.5.18` |
-| Keeper image | `michaelcourcy/ocp-etcd-backup:8.5.12` (UBI9-minimal + `etcdctl`/`etcdutl` 3.5.18 + `kubectl` 1.31.6) |
+| Keeper image | `ghcr.io/kastenhq/blueprint-ai/ocp-etcd-backup:v3.5.18` (UBI9-minimal + `etcdctl`/`etcdutl` 3.5.18 + `kubectl` 1.31.6) |
 
 There is **no operator** — etcd is part of the OpenShift control plane.
 
@@ -105,7 +105,7 @@ There is **no operator** — etcd is part of the OpenShift control plane.
 
 ## The keeper image
 
-`michaelcourcy/ocp-etcd-backup:8.5.12` (public). Built from
+`ghcr.io/kastenhq/blueprint-ai/ocp-etcd-backup:v3.5.18` (public). Built from
 [`images/ocp-etcd-backup/Dockerfile`](images/ocp-etcd-backup/Dockerfile):
 
 - Base: `registry.access.redhat.com/ubi9/ubi-minimal`
@@ -124,9 +124,15 @@ To rebuild:
 
 ```bash
 cd images/ocp-etcd-backup
-docker build --platform linux/amd64 -t michaelcourcy/ocp-etcd-backup:8.5.12 .
-docker push michaelcourcy/ocp-etcd-backup:8.5.12
+docker build --platform linux/amd64 -t ghcr.io/kastenhq/blueprint-ai/ocp-etcd-backup:v3.5.18 .
+docker push ghcr.io/kastenhq/blueprint-ai/ocp-etcd-backup:v3.5.18
 ```
+
+> You do not need to rebuild to use this blueprint — the tag above is public and pulls anonymously.
+> `ghcr.io/kastenhq/blueprint-ai` is written by this repository's CI, so **pushing to it will fail
+> with `unauthorized`**. Substitute your own registry and update `keeper.yaml` accordingly. The tag
+> tracks the **etcd** version (`ARG ETCD_SOURCE_IMAGE`), not the Kasten version, because the image
+> is `ubi-minimal` + `etcdctl` + `kubectl` and derives from no Kasten image.
 
 ---
 

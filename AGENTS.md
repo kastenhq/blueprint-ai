@@ -164,10 +164,44 @@ Any preparation the operator must perform before triggering a Kasten restore (pa
 **Keep the "Blueprint actions" table in `README.md` in sync with the blueprint YAML at all times.**
 Every action defined in the blueprint (`backupPrehook`, `backupPosthook`, `restorePosthook`, and so on) must have a row in that table describing what it does. No action may exist in the YAML without a corresponding row, and no row may exist without a corresponding action in the YAML.
 
-If a custom container image is needed (for example, a tool image for `KubeTask` or a kubeOps that create a pod), commit its `Dockerfile`
-in a subdirectory of the blueprint folder: `<blueprint-dir>/images/<image-name>/Dockerfile`.
-**Never reference a custom image in a blueprint without a committed Dockerfile.** Document the
-image name, base image, and what was added in the `README.md`.
+If a custom container image is needed (for example, a tool image for `KubeTask` or a kubeOps that
+create a pod), commit its `Dockerfile`:
+
+- **Shared image** (used by more than one blueprint — for example, `kasten-tools`, which is
+  `kanister-tools` + `kubectl` + `jq`) → **one canonical copy at the repo root**:
+  `images/<image-name>/Dockerfile`, next to an `images/<image-name>/README.md` documenting what the
+  image adds and how to build it. **Prefer the shared image.** Do **not** duplicate it into a
+  blueprint folder — that reintroduces version drift. Each consuming blueprint's `README.md`
+  references the shared file with a relative link (`../images/<image-name>/Dockerfile`) and
+  documents the build-arg versions it was tested with. See
+  [images/kasten-tools/](images/kasten-tools/) for the reference layout.
+- **Blueprint-specific image** (only that blueprint can use it, because the tooling is specific to
+  that workload) → `<blueprint-dir>/images/<image-name>/Dockerfile`. Use this **only when the
+  shared image cannot work** — for example,
+  [ocp-etcd-backup-example/images/ocp-etcd-backup/](ocp-etcd-backup-example/images/ocp-etcd-backup/).
+
+**Never reference a custom image in a blueprint without a committed Dockerfile** — every blueprint
+`README.md` must point (directly, or through the shared image) to the `Dockerfile` behind every
+image it uses. Document the image name, base image, and what was added.
+
+**Match the custom image version to the Kasten version installed on the cluster.** When a custom
+image derives from a Kasten image (for example, `gcr.io/kasten-images/kanister-tools:<version>`),
+the default version — whether a `Dockerfile` `ARG` (for example, `ARG KASTEN_VERSION=...`) or the
+base image tag — must match the Kasten version actually running on the test cluster. Detect it
+first with `helm ls -n kasten-io` (or the OLM CSV command above), then set that exact version as
+the default. Do not carry over a version from a previous blueprint. Mismatched tool/Kasten
+versions can cause subtle incompatibilities and make the test environment unrepresentative.
+
+Because the same shared image serves clusters running different Kasten versions, **always pass the
+versions explicitly as build args** rather than relying on the `Dockerfile` defaults, and tag the
+result with the Kasten version it was built for. The `ARG` defaults only track the most recently
+tested version.
+
+**Keep every pinned tool version in the Dockerfile equal to what the `README.md` documents.** This
+applies to `kubectl` (`ARG KUBECTL_VERSION` should match the Kubernetes version in the README
+versions table), and to any other tool the image installs at a pinned version. The Dockerfile and
+the README must never disagree on a version — when you change one, change the other in the same
+commit.
 
 Do not assume that the base image contains jq, yq or kubectl, most of the time you have to add them.
 

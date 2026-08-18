@@ -22,7 +22,7 @@ actions:
         # ConfigMaps into any namespace.
         args:
           namespace: kasten-io
-          image: michaelcourcy/kasten-tools:8.5.2
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2
           command:
             - bash
             - -c

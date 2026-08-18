@@ -76,7 +76,7 @@ Versions used when this blueprint was developed and tested:
 | Kasten | `8.5.9` |
 | CockroachDB | `v24.3.33` |
 | MinIO | `RELEASE.2025-04-22T22-12-26Z` |
-| Tool image | `michaelcourcy/kasten-tools:8.5.2` (adds `kubectl` to `kanister-tools`) |
+| Tool image | `ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2` (adds `kubectl` to `kanister-tools`) |
 
 Detect your Kasten version from the cluster:
 
@@ -86,7 +86,7 @@ helm ls -n kasten-io
 
 ## Custom image
 
-The blueprint runs its phases with `michaelcourcy/kasten-tools:8.5.2`, which is
+The blueprint runs its phases with `ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2`, which is
 `gcr.io/kasten-images/kanister-tools:8.5.2` plus `kubectl` (the stock image has no `kubectl`).
 The CockroachDB `BACKUP`/`RESTORE` SQL runs **inside** a CockroachDB pod via `kubectl exec`, so no
 extra database tooling is needed in the image. A `Dockerfile` for an equivalent image:
