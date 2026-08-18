@@ -26,6 +26,20 @@ For action hooks (namespace context), any action name is valid — convention is
 
 ---
 
+## Blueprint Directory Naming
+
+Every top-level blueprint directory **must** be suffixed with `-example` (for example,
+`cnpg-example`, `rhoso-galera-example`). The suffix is not cosmetic — it is a standing reminder
+that a blueprint is **not a general-purpose solution**. Each one encodes assumptions about the
+operator version, the CR layout, the storage class, the credentials, the namespace topology, and
+the acceptable consistency level of the deployment it was developed against. Reusing one unchanged
+in a different context is a data-loss risk.
+
+Readers are expected to copy the directory, rename it, adapt it to their own deployment, then
+re-run Steps 2–5 to validate it. See the ownership disclaimer in [README.md](README.md).
+
+---
+
 ## Blueprint Development Workflow
 
 Follow these five steps in order when developing a new blueprint.
