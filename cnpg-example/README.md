@@ -251,3 +251,9 @@ kubectl delete namespace cnpg-system
 kubectl delete blueprint cnpg-blueprint -n kasten-io
 kubectl delete blueprintbinding cnpg-blueprint-binding -n kasten-io
 ```
+
+---
+
+## Initial prompt
+
+> Create a blueprint to back up a CNPG instance.

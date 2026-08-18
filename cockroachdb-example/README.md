@@ -260,3 +260,11 @@ kubectl logs -n kasten-io -l app=kanister-svc --tail=100
 # Executor service (primary debug target)
 kubectl logs -n kasten-io -l component=executor --tail=10000 -f
 ```
+
+---
+
+## Initial prompt
+
+> Can you make a blueprint for CockroachDB deployed on Kubernetes
+> https://www.cockroachlabs.com/docs/stable/deploy-cockroachdb-with-kubernetes
+> Be careful it is distributed, I doubt snapshotting the node PVCs gives anything restorable.

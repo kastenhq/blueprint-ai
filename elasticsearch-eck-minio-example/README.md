@@ -401,3 +401,12 @@ All lifecycle phases pass end-to-end:
   the blueprint's `delete` action, which calls
   `DELETE /_snapshot/kasten-repo/<snapshot>` against the live ES.
   Verified end-to-end against a real Kasten policy.
+
+---
+
+## Initial prompt
+
+> Create a blueprint for Elasticsearch but unlike elasticsearch-eck implement pattern 5 (like
+> cnpg-barman) with MinIO keeper. Also contrary to elasticsearch-eck do not delete all the
+> Elasticsearch snapshots at each backup. The Elasticsearch snapshot is deleted by the delete action
+> invoked each time a restore point is retired.

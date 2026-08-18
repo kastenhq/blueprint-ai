@@ -161,6 +161,26 @@ Omit the operator row for workloads deployed without an operator (plain Helm cha
 
 Any preparation the operator must perform before triggering a Kasten restore (pausing an operator, scaling down, deleting a CR, and so on) must be documented as manual steps in the `README.md`.
 
+**Always include an "Initial prompt" section** at the end of the `README.md`, quoting the prompt
+that started the blueprint. This repository's premise is that blueprints are produced by prompting
+an agent, so the prompt is part of the record: it captures the intent, the constraints, and the
+trade-offs the requester cared about — context that the finished YAML cannot express. A reader
+adapting the blueprint needs to know what was actually asked for.
+
+Quote the prompt as it was given, lightly cleaned up at most, and **keep it short — three lines at
+most.** Real opening prompts are brief: *"Create a blueprint to back up a CNPG instance"* is a
+complete and typical one. Do not rewrite it into a polished summary of the blueprint — a summary
+describes the result, whereas the value here is the *request*. The architecture back-and-forth that
+follows the first prompt does not need to be reproduced. A prompt may legitimately be longer than
+three lines when the requester really did supply that much detail up front (constraints, a runbook
+to work from, an environment that cannot be tested).
+
+**Do not put the pattern choice in the prompt.** Selecting the pattern is Step 1's job, done from
+the workload's characteristics — writing it into the prompt makes the analysis look pre-decided. The
+only exception is when the requester genuinely did specify it, which the blueprint's own README will
+say. Stating a *doubt* is fine and often useful (*"I am not sure snapshotting the node PVCs gives
+anything restorable"*), because that is a requester's observation rather than a decision.
+
 **Keep the "Blueprint actions" table in `README.md` in sync with the blueprint YAML at all times.**
 Every action defined in the blueprint (`backupPrehook`, `backupPosthook`, `restorePosthook`, and so on) must have a row in that table describing what it does. No action may exist in the YAML without a corresponding row, and no row may exist without a corresponding action in the YAML.
 

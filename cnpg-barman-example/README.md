@@ -440,3 +440,16 @@ kubectl delete blueprintbinding cnpg-barman-blueprint-binding -n kasten-io
 # Clean up restore point contents created by Kasten
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=cnpg-barman
 ```
+
+---
+
+## Initial prompt
+
+> I want a blueprint to back up a CNPG instance using Barman to leverage PIT (Point In Time) restore.
+> I do not want you to implement the restore pre and post hook because this is not adapted in the
+> Kasten context. Instead I want you to document the steps by giving an example to restore at a
+> precise PIT.
+> The Barman configuration works with a local MinIO cluster, one MinIO cluster per CNPG instance.
+> We are in pattern 5 "Database dump or snapshot through a local MinIO keeper (PVC mounted by a
+> keeper, but the keeper exposes S3-protocol)" so you do not need to ask for validation of the
+> pattern.

@@ -479,3 +479,11 @@ kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=cnpg-barman-clo
 # (Optional) remove the plugin itself — only if no other cluster uses it
 # kubectl delete -f https://github.com/cloudnative-pg/plugin-barman-cloud/releases/download/v0.13.0/manifest.yaml
 ```
+
+---
+
+## Initial prompt
+
+> The in-tree barman-cloud integration used in cnpg-barman is deprecated and will be removed in
+> CNPG 1.30. Can you make the same blueprint with the Barman Cloud Plugin instead
+> https://cloudnative-pg.io/plugin-barman-cloud/

@@ -324,3 +324,9 @@ print("count:", docs.length);
 docs.forEach(d => print(d.name, d.email, d.plan));
 '
 ```
+
+---
+
+## Initial prompt
+
+> Create a blueprint for MongoDB deployed with the Percona operator.

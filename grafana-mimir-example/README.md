@@ -430,3 +430,10 @@ ingesters (HTTP 204) and snapshotted only `mimir-minio`; after wiping the bucket
 blocks. Because `restorePosthook` restarts only the store-gateway + compactor, live data the
 ingesters received after the backup was preserved (new blocks appear alongside the restored ones).
 
+---
+
+## Initial prompt
+
+> I need a blueprint for Grafana Mimir. You can find the deployment method here
+> https://grafana.com/docs/helm-charts/mimir-distributed/latest/get-started-helm-charts/
+> It seems from what I could read on internet that backup could be handled on S3.

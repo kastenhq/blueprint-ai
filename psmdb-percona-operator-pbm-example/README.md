@@ -364,3 +364,10 @@ kubectl delete blueprint psmdb-pbm-blueprint -n kasten-io
 kubectl delete blueprintbinding psmdb-pbm-blueprint-binding -n kasten-io
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=psmdb-test
 ```
+
+---
+
+## Initial prompt
+
+> Create a blueprint for MongoDB deployed with the Percona operator but in sharded mode and using the
+> backup/restore CR.

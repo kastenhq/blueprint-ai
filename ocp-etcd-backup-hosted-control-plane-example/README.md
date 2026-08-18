@@ -650,3 +650,11 @@ kubectl delete -k .
 # (optional, on the guest) the marker used for restore validation
 oc --kubeconfig <guest-kubeconfig> delete namespace etcd-restore-test --ignore-not-found
 ```
+
+---
+
+## Initial prompt
+
+> Can you do the same as ocp-etcd-backup but for HyperShift hosted control planes. I would like a
+> single keeper on the hub cluster that backs up the etcd of all the guest clusters, so that adding a
+> new guest needs no extra setup.

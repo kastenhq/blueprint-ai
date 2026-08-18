@@ -123,3 +123,11 @@ Verify the RunAction reaches `Complete`
 # List restore points (application namespace)
 kubectl get restorepoint -n <app-ns>
 ```
+
+---
+
+## Initial prompt
+
+> Can you make a blueprint for a PostgreSQL database running inside a Windows VM on OpenShift
+> Virtualization. The VM disk is a DataVolume so Kasten already snapshots it, I only want the database
+> to be consistent in the snapshot.

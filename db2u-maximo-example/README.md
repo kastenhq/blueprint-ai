@@ -294,3 +294,24 @@ Remove the blueprint and binding:
 kubectl delete -f blueprintbinding.yaml
 kubectl delete -f blueprint.yaml
 ```
+
+---
+
+## Initial prompt
+
+> Can you make a blueprint for backing up DB2 on Maximo with a dump.
+> You do not have to install the database and create test data. They are already provided by Maximo.
+> Only use the current context and the db2u namespace.
+> For your restore test you should find a description field and alter it to see that your alteration
+> is reverted.
+> It seems (but that needs confirmation) that a backup PVC already exists. The pattern 3 (Database
+> snapshot on a permanent PVC) comes naturally.
+> The starting point for the IBM documentation is here:
+> https://www.ibm.com/docs/en/db2/11.5.x?topic=ad-backing-up-restoring-db2
+> We want to be able to restore on another Maximo instance. We also need to manage the encryption
+> keystore https://www.ibm.com/docs/en/db2/11.5.x?topic=ad-locating-keystore but I do not know exactly
+> what it is and how we should include this artifact in the backup/restore process. This you need to
+> discover and explain.
+> You do not have to restore db2u in another Maximo instance, but you must bring extra instructions on
+> how it should be restored on another instance to ensure that the client applications that connect to
+> this instance do not have to renew their truststore.

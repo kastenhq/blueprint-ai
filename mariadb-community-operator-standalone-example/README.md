@@ -223,3 +223,10 @@ kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=mariadb-test
 | `blueprint.yaml` | Kasten Blueprint |
 | `blueprintbinding.yaml` | BlueprintBinding targeting all MariaDB CRs |
 | [`../images/kasten-tools/Dockerfile`](../images/kasten-tools/Dockerfile) | Dockerfile for `ghcr.io/kastenhq/blueprint-ai/kasten-tools` |
+
+---
+
+## Initial prompt
+
+> Create a blueprint to back up a MariaDB standalone database using the MariaDB operator
+> https://mariadb.com/docs/server/server-management/automated-mariadb-deployment-and-administration/kubernetes-and-mariadb/kubernetes-operators-for-mariadb.

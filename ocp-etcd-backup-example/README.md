@@ -452,3 +452,11 @@ kubectl delete -f keeper.yaml
 kubectl delete namespace minio --ignore-not-found
 kubectl delete profile <YOUR_LOCATION_PROFILE> -n kasten-io --ignore-not-found
 ```
+
+---
+
+## Initial prompt
+
+> Have a look at https://github.com/Jaiganeshjk12/etcd-bp-azcopy, it backs up the OpenShift etcd and
+> uploads it to Azure Blob with azcopy. Can you rework it so that Kasten is the data mover and we do
+> not need azcopy or any cloud identity any more.

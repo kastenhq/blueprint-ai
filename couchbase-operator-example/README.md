@@ -245,3 +245,14 @@ kubectl delete blueprintbinding couchbase-blueprintbinding -n kasten-io
 kubectl delete restorepointcontent \
   -l k10.kasten.io/appNamespace=couchbase-test
 ```
+
+---
+
+## Initial prompt
+
+> Can you make a blueprint for Couchbase based on the installation described here
+> https://docs.couchbase.com/operator/current/install-kubernetes.html
+>
+> A later follow-up prompt in the same effort:
+>
+> Can you retest the Couchbase solution end to end and start by cleaning up.

@@ -701,3 +701,11 @@ kubectl delete role,rolebinding cp4d-backup-read-creds -n cpd
 # Kasten restore-point content for this app
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=cp4d-projects-backup
 ```
+
+---
+
+## Initial prompt
+
+> Can you make a blueprint for IBM Cloud Pak for Data to back up the analytics projects. cpdbr already
+> does a platform-level backup but it is all or nothing, and on a multi-tenant CP4D I want to be able
+> to restore a single project.

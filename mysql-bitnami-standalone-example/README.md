@@ -234,3 +234,10 @@ If a `backupPrehook` fails, the lock session may linger; the next `backupPosthoo
 kubectl exec mysql-0 -n mysql-test -c mysql -- bash -c '
 [ -f /tmp/mysql-lock.pid ] && kill "$(cat /tmp/mysql-lock.pid)" 2>/dev/null; rm -f /tmp/mysql-lock.pid'
 ```
+
+---
+
+## Initial prompt
+
+> Can you make a blueprint for MySQL deployed with the Bitnami Helm chart in standalone architecture
+> https://github.com/bitnami/charts/tree/main/bitnami/mysql

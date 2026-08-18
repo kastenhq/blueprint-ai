@@ -91,3 +91,10 @@ kubectl delete namespace sts-echo-test
 kubectl delete blueprint configmap-echo -n kasten-io
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=sts-echo-test
 ```
+
+---
+
+## Initial prompt
+
+> I need a very simple demo blueprint that just echoes the labels of the StatefulSet it is bound to,
+> to show how the Kanister template context works when Kasten invokes a blueprint.

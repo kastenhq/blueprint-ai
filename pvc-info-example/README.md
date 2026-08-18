@@ -228,3 +228,13 @@ kubectl delete namespace pvc-info-test
 kubectl delete policy pvc-info-test-backup -n kasten-io
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=pvc-info-test
 ```
+
+---
+
+## Initial prompt
+
+> Sometimes teams exclude the PVCs from the namespace backup but still want to keep track of PVC and
+> PV information present in the namespace. Create a blueprint that you invoke from a policy before we
+> back up the namespace. The blueprint generates a ConfigMap in the namespace that contains
+> information about each PVC with the PV it is attached to. This information should be in a YAML
+> file.

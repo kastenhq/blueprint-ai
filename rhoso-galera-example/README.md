@@ -426,3 +426,19 @@ oc delete restorepointcontent -l k10.kasten.io/appNamespace=openstack
    policy over the `rhoso-galera-keeper=true` label backs them all up correctly.
 8. **Credential rotation runbook** — map it to the customer's exact set of OpenStack
    services.
+
+---
+
+## Initial prompt
+
+> Can you create a blueprint using pattern 4 (Database dump or snapshot on a permanent Keeper PVC) for
+> a RHOSO Galera cluster deployed on OpenShift. The issue is that we do not have the environment
+> available. You must build by speculating on the Red Hat KCS runbook *"How do I backup and restore
+> galera clusters in Red Hat OpenStack Services on OpenShift"* (obtain it from Red Hat support). You
+> will use the folder rhoso-galera as the directory for the blueprint, BlueprintBinding, and README.
+> Also the GitHub project for this operator is
+> https://github.com/openstack-k8s-operators/mariadb-operator but there is little documentation.
+> However, reading their code can help understand the functioning of this operator. As already stated
+> at the beginning of this prompt we do not want you to test and validate (at least for the moment)
+> because this environment is not available. Create the best possible starting point that will be
+> validated with the customer in a future meeting.

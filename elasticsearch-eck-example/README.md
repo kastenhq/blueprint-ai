@@ -331,3 +331,10 @@ kubectl delete -f https://download.elastic.co/downloads/eck/2.16.1/operator.yaml
 kubectl delete -f https://download.elastic.co/downloads/eck/2.16.1/crds.yaml
 kubectl delete namespace elastic-system
 ```
+
+---
+
+## Initial prompt
+
+> Can you make a blueprint for an Elasticsearch cluster deployed with the official operator
+> https://www.elastic.co/docs/deploy-manage/deploy/cloud-on-k8s
