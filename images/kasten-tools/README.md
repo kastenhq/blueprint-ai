@@ -24,20 +24,33 @@ Kasten service account and its cross-namespace RBAC.
 
 ## Published tags
 
-Built and pushed automatically by
-[`.github/workflows/kasten-tools-image.yaml`](../../.github/workflows/kasten-tools-image.yaml) on
-every change to this directory. The workflow reads `ARG KASTEN_VERSION` from the `Dockerfile` and
-publishes that as the version tag, alongside `latest` and a `sha-<commit>` tag. Images are
-multi-arch (`linux/amd64`, `linux/arm64`).
+**Each blueprint pins the Kasten version it was tested against**, so this image is published as
+one tag per referenced version rather than a single moving tag.
+[`.github/workflows/kasten-tools-image.yaml`](../../.github/workflows/kasten-tools-image.yaml)
+scans the blueprint manifests for every `kasten-tools:<version>` reference and builds one
+multi-arch image (`linux/amd64`, `linux/arm64`) per version.
+
+That makes the tag list **self-maintaining**: reference `kasten-tools:8.6.2` in a new blueprint and
+the workflow builds and publishes `8.6.2` on merge, with no change to the workflow or this file.
+Previously published tags stay available, so blueprints pinned to an older Kasten version keep
+working.
 
 | Tag | Used by |
 |---|---|
-| `8.5.2` | cnpg, cnpg-barman, cnpg-barman-cloud, cockroachdb, couchbase-operator, elasticsearch-eck, elasticsearch-eck-minio, postgres-windows, psmdb-percona-operator, psmdb-percona-operator-pbm, pvc-info |
+| `8.5.2` | elasticsearch-eck, mariadb-community-operator-standalone, postgres-windows, pvc-info |
+| `8.5.4` | cnpg, cnpg-barman, couchbase-operator, psmdb-percona-operator, psmdb-percona-operator-pbm |
+| `8.5.7` | elasticsearch-eck-minio |
+| `8.5.9` | cnpg-barman-cloud, cockroachdb |
 | `8.5.13` | grafana-mimir |
 
-To publish a new version tag: bump `ARG KASTEN_VERSION` in the `Dockerfile` and merge to `main`.
-Previously published tags stay available, so blueprints pinned to an older Kasten version keep
-working.
+`ARG KASTEN_VERSION` in the `Dockerfile` is the **most recently tested** version. It is always
+built even if no blueprint references it, and it is the only version also tagged `latest`. There is
+no `sha-<commit>` tag — with one build per version, a commit-scoped tag would be ambiguous.
+
+> **The tag must equal the Kasten version in the blueprint's own README versions table.** A
+> blueprint documenting Kasten `8.5.7` while pulling `kasten-tools:8.5.2` is a bug: the tool image
+> would not match the Kasten release it runs beside. The same applies to any direct
+> `gcr.io/kasten-images/kanister-tools:<version>` reference.
 
 ## Building it yourself
 

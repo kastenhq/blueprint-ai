@@ -87,7 +87,7 @@ spec:
         # bundles curl + kando (needed for kando output artifact emission)
         # + sync, all in one Red Hat UBI minimal base.
         - name: tools
-          image: gcr.io/kasten-images/kanister-tools:8.5.2
+          image: gcr.io/kasten-images/kanister-tools:8.5.7
           command: ["sleep", "infinity"]
       volumes:
         - name: data

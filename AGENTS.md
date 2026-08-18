@@ -197,6 +197,16 @@ versions explicitly as build args** rather than relying on the `Dockerfile` defa
 result with the Kasten version it was built for. The `ARG` defaults only track the most recently
 tested version.
 
+**Every image tag must equal the Kasten version in the blueprint's own README versions table.**
+This is a hard consistency rule and it applies to every reference in the blueprint directory — the
+`blueprint.yaml`, any keeper or MinIO manifest, and the README prose and tables alike. It covers
+both the shared `kasten-tools` image and any direct
+`gcr.io/kasten-images/kanister-tools:<version>` reference. A blueprint documenting Kasten `8.5.7`
+while pulling `kasten-tools:8.5.2` is a bug: the tool image no longer matches the Kasten release it
+runs beside. When you bump the Kasten version in the versions table, bump every image reference in
+the same commit. You do not need to build the new tag — CI discovers referenced versions and
+publishes them automatically (see [images/kasten-tools/README.md](images/kasten-tools/README.md)).
+
 **Keep every pinned tool version in the Dockerfile equal to what the `README.md` documents.** This
 applies to `kubectl` (`ARG KUBECTL_VERSION` should match the Kubernetes version in the README
 versions table), and to any other tool the image installs at a pinned version. The Dockerfile and

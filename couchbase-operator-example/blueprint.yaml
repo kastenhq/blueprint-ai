@@ -71,7 +71,7 @@ actions:
       name: resumeCluster
       args:
         namespace: kasten-io
-        image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.2
+        image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.4
         command:
         - /bin/bash
         - -c

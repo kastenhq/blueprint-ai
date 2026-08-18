@@ -1,35 +1,79 @@
 name: kasten-tools image
 
+# The shared kasten-tools image is consumed by many blueprints, each pinned to the
+# Kasten version it was developed and tested against. So this workflow does not build
+# one tag — it discovers every kasten-tools tag referenced anywhere in the blueprints
+# and builds one image per version.
+#
+# That makes the version list self-maintaining: a new blueprint referencing
+# kasten-tools:8.6.0 causes 8.6.0 to be built on merge, with no change to this file.
+# Consequently the trigger must also watch the blueprint YAML, not just the image dir.
+
 on:
   workflow_dispatch:
   pull_request:
     paths:
       - "images/kasten-tools/**"
+      - ".github/workflows/kasten-tools-image.yaml"
+      - "*-example/**/*.yaml"
   push:
     branches:
       - main
     paths:
       - "images/kasten-tools/**"
+      - ".github/workflows/kasten-tools-image.yaml"
+      - "*-example/**/*.yaml"
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/kasten-tools
 
 jobs:
-  build-and-push-image:
+  discover-versions:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    outputs:
+      versions: ${{ steps.scan.outputs.versions }}
+      default_version: ${{ steps.scan.outputs.default_version }}
     steps:
       - name: Check out code
         uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
 
-      - name: Extract KASTEN_VERSION from Dockerfile
-        id: versions
+      - name: Discover referenced Kasten versions
+        id: scan
         run: |
-          kasten_version=$(grep -oP '(?<=ARG KASTEN_VERSION=)\S+' images/kasten-tools/Dockerfile)
-          echo "kasten_version=${kasten_version}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          # Every kasten-tools tag referenced by a blueprint manifest. Scoped to the
+          # blueprint directories on purpose: scanning the whole tree would also match
+          # example versions written in this workflow's own comments.
+          refs=$(grep -rhoE 'kasten-tools:[0-9]+\.[0-9]+\.[0-9]+' --include='*.yaml' ./*-example/ \
+                   | sed 's/.*://')
+
+          # ARG default in the Dockerfile: the most recently tested version. It is built
+          # even if no blueprint references it, and it is the only one tagged `latest`.
+          default_version=$(grep -oE 'ARG KASTEN_VERSION=[^[:space:]]+' images/kasten-tools/Dockerfile | sed 's/.*=//')
+
+          versions=$(printf '%s\n%s\n' "$refs" "$default_version" | sort -u -V | jq -Rrn '[inputs | select(length > 0)] | tojson')
+
+          echo "versions=${versions}" >> "$GITHUB_OUTPUT"
+          echo "default_version=${default_version}" >> "$GITHUB_OUTPUT"
+
+          echo "Dockerfile ARG default : ${default_version}"
+          echo "Building versions      : ${versions}"
+
+  build-and-push-image:
+    needs: discover-versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        kasten_version: ${{ fromJSON(needs.discover-versions.outputs.versions) }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
 
       - name: Extract Docker metadata
         id: meta
@@ -37,9 +81,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha
-            type=raw,value=${{ steps.versions.outputs.kasten_version }},enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=raw,value=${{ matrix.kasten_version }},enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && matrix.kasten_version == needs.discover-versions.outputs.default_version }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3 # v3.0.0
@@ -60,6 +103,8 @@ jobs:
         with:
           context: images/kasten-tools
           platforms: linux/amd64,linux/arm64
+          build-args: |
+            KASTEN_VERSION=${{ matrix.kasten_version }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
