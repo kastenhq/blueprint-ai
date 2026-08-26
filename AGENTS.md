@@ -300,13 +300,27 @@ Then:
    ```bash
    aws s3 ls "s3://<BUCKET>/${PREFIX}/" --recursive --summarize | tail -3
    ```
-   > ⚠️ **Do not rely on `ExportAction.status.progressDetails.transferredBytes`.** Kasten discards
-   > `progressDetails` when an action completes, so a finished ExportAction reports only `state`,
-   > `progress` and timestamps. That figure has to be sampled *while the export is still running*.
-   > Repository growth on the object store is the retained, verifiable number — use it.
+   > **Two figures, and they measure different things. Capture both.**
    >
-   > Sum **both** prefixes Kasten writes: `migration/repo/<namespace-uid>/` holds the bulk (the
-   > exported volume data) and `migration/<policy-name>/kopia/` is a smaller companion repository.
+   > 1. `ExportAction.status.progressDetails.transferredBytes` — what Kasten actually put on the
+   >    wire. This is the number to quote for export cost. Read it from the **data** export action,
+   >    which carries the label `k10.kasten.io/exportType: portableAppData`. There is usually also a
+   >    *metadata* export action (`k10.kasten.io/isMetadataExport: "true"`, no `exportType` label)
+   >    which has no `progressDetails` at all — do not mistake it for the data export:
+   >    ```bash
+   >    kubectl get exportaction -n <APP_NAMESPACE> \
+   >      -l k10.kasten.io/exportType=portableAppData \
+   >      --sort-by=.metadata.creationTimestamp -o yaml | sed -n '/progressDetails/,+8p'
+   >    ```
+   >    **Capture it promptly.** `progressDetails` is not durably retained: observed on Kasten
+   >    `9.0.4`, completed data-export actions still reported it when read soon after the run, but
+   >    every one of 26 older completed actions had lost it. Do not plan to read it hours later.
+   >
+   > 2. **Object-store repository growth** — durable and re-checkable at any time, so it is the right
+   >    figure for a reproducible README table. It runs larger than `transferredBytes` because it
+   >    includes Kopia index and metadata blobs. Sum **both** prefixes Kasten writes:
+   >    `migration/repo/<namespace-uid>/` holds the bulk (the exported volume data) and
+   >    `migration/<policy-name>/kopia/` is a smaller companion repository.
 4. **Introduce a representative change** in the database — a realistic delta, not a rewrite. For
    example modify or add ~1% of records.
    > ⚠️ **Make sure the generated data is actually random.** Bulk-load tools often write an identical

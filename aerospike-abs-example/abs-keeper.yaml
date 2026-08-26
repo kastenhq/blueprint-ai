@@ -94,12 +94,19 @@ spec:
             # (kubectl exec -- printenv), so changing it here and rolling the
             # StatefulSet is enough — the blueprint needs no edit.
             #
-            # Trade-off. A longer chain transfers less on export, but widens the
-            # window in which a DELETED record can be resurrected by a restore:
-            # absctl incrementals carry changed and new records, never
+            # Trade-off. A longer chain transfers far less on export, but widens
+            # the window in which a DELETED record can be resurrected by a
+            # restore: absctl incrementals carry changed and new records, never
             # deletions. The next full "heals" that window, so this value is
-            # effectively the maximum exposure. Set 0 if deletions must never
-            # come back (GDPR erasure and similar).
+            # effectively the maximum exposure.
+            #
+            # 3 is the shipped default because operators of this workload class
+            # generally accept that trade: Aerospike is usually a serving or
+            # session layer where records are re-derivable and the objective is
+            # fast recovery, not exact deletion history. Set 0 when a deletion
+            # must never come back (compliance erasure, or a namespace holding
+            # the authoritative copy of something) - at the cost of a full
+            # export every run.
             - name: ABSCTL_INCREMENTALS_BEFORE_FULL
               value: "3"
           volumeMounts:

@@ -94,8 +94,9 @@ What genuinely improves:
   that can silently omit one.
 
 What does **not** improve: the deleted-record risk is inherent to logical incrementals, not to ABS.
-It applies here too, and `ABSCTL_INCREMENTALS_BEFORE_FULL=0` is the only way to eliminate it —
-see [Incremental chains](#incremental-chains).
+It applies here too, bounded by `ABSCTL_INCREMENTALS_BEFORE_FULL` and eliminated only by setting it
+to `0`. In practice it is an accepted trade-off for this workload class — see
+[Incremental chains](#incremental-chains).
 
 ---
 
@@ -131,11 +132,20 @@ and rolling the StatefulSet is enough — no blueprint edit. When a full is take
 `full-`/`incr-` directory for that namespace is pruned. Pruning the live volume never affects
 existing restore points, which are immutable snapshots.
 
-> ⚠️ **Incrementals reintroduce the deleted-record risk.** absctl incrementals carry changed and new
-> records, never deletions, so a record deleted *after* the last full can be resurrected by a restore
-> of that chain. The next full heals it, which makes `ABSCTL_INCREMENTALS_BEFORE_FULL` the maximum
-> exposure window. Durable deletes do **not** help — an incremental after a durable delete produced
-> no output at all. Set `0` if deletions must never come back (GDPR erasure and similar).
+> ℹ️ **Incrementals can resurrect a deleted record — usually an acceptable trade.** absctl
+> incrementals carry changed and new records, never deletions, so a record deleted *after* the last
+> full comes back if that chain is restored. The next full heals it, which makes
+> `ABSCTL_INCREMENTALS_BEFORE_FULL` the maximum exposure window. Durable deletes do **not** help — an
+> incremental taken after a durable delete produced no output at all.
+>
+> Per Aerospike's own solution architects, operators of this workload class generally **do not**
+> consider this a blocker: Aerospike is typically a serving or session layer where records are
+> re-derivable and the recovery objective is "get the cluster back fast", not "reproduce the exact
+> deletion history". That is why this blueprint ships with `3` rather than `0`.
+>
+> Set `0` when a deletion genuinely must never come back — a compliance erasure path (GDPR and
+> similar), or a namespace holding the authoritative copy of something. It costs a full export every
+> run; see [Export cost — measured](#export-cost--measured).
 
 A detail worth knowing if you modify this: absctl writes **nothing at all — not even the
 directory** — when an incremental finds no changed records. The blueprint pre-creates the directory
@@ -195,10 +205,32 @@ by orchestration — snapshot creation, pod scheduling, export setup — and abs
 milliseconds. Expect the incremental gain to become visible in the action duration only once the
 dataset is large enough for the scan to dominate.
 
-> **Measuring `transferredBytes` yourself:** Kasten **discards `status.progressDetails` when an
-> action completes**, so a completed ExportAction shows only `state`, `progress` and timestamps. The
-> figure has to be sampled *while the export is running*, or derived from the Kopia repository growth
-> on the object store, which is what the table above uses because it is retained and verifiable.
+### What Kasten actually put on the wire
+
+The table above uses object-store repository growth because it is durable and re-checkable. Kasten's
+own accounting is smaller and even more favourable, because the export is *block*-incremental on top
+of the append-only layout — taken from the `portableAppData` ExportAction status:
+
+| Export | `readBytes` | `transferredBytes` |
+|---|---|---|
+| full | 28,700,000 | **28,700,000** |
+| incremental | **168** | **4,400** |
+
+`processedBytes: 29000168` alongside `readBytes: 168` shows it walking the whole volume but reading
+only the changed blocks — a ~6,500x reduction on the wire for an incremental.
+
+> **Reading these figures yourself.** Use the **data** export action, labelled
+> `k10.kasten.io/exportType: portableAppData`. The *metadata* export action
+> (`k10.kasten.io/isMetadataExport: "true"`) has no `progressDetails` at all and is easy to grab by
+> mistake when simply taking the newest action:
+> ```bash
+> kubectl get exportaction -n aerospike-test \
+>   -l k10.kasten.io/exportType=portableAppData \
+>   --sort-by=.metadata.creationTimestamp -o yaml | sed -n '/progressDetails/,+8p'
+> ```
+> **Capture it promptly** — `progressDetails` is not durably retained. On this cluster every one of
+> 26 older completed data-export actions had lost it, so do not plan to read it hours after the run.
+> That is why the results table uses repository growth.
 
 ## Prerequisites
 
