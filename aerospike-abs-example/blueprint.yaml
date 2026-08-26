@@ -72,6 +72,7 @@ actions:
           cluster: "{{ .Phases.absctlBackup.Output.cluster }}"
           namespaces: "{{ .Phases.absctlBackup.Output.namespaces }}"
           dumpKiB: "{{ .Phases.absctlBackup.Output.dumpKiB }}"
+          summary: "{{ .Phases.absctlBackup.Output.summary }}"
     phases:
       - func: KubeTask
         name: absctlBackup
@@ -151,57 +152,150 @@ actions:
               # --remove-files replaces the previous dump in place, so the PVC
               # holds exactly one complete dump per namespace and the file paths
               # are stable across runs (which is what lets Kopia deduplicate).
+              # --- Incremental chain length, read from the RUNNING keeper ---
+              MAXINCR=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                sh -c 'printenv ABSCTL_INCREMENTALS_BEFORE_FULL 2>/dev/null || echo 0' \
+                | tr -d '\r ')
+              case "${MAXINCR}" in
+                ''|*[!0-9]*) MAXINCR=0 ;;
+              esac
+              echo "Incrementals before a forced full: ${MAXINCR} (0 = always full)"
+
+              # One UTC stamp for this whole run. Sortable, no colons, and
+              # convertible to absctl's --modified-after format.
+              STAMP=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                date -u +%Y%m%dT%H%M%SZ | tr -d '\r ')
+              echo "Run stamp: ${STAMP}"
+
+              # 20260826T094950Z -> 2026-08-26_09:49:50
+              stamp_to_absctl() {
+                echo "$1" | sed -E 's/^([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z$/\1-\2-\3_\4:\5:\6/'
+              }
+
+              TOTAL_KIB=0
+              SUMMARY=""
+
               for ASNS in ${NAMESPACES}; do
                 echo "--------------------------------------------------------"
-                echo "Dumping namespace ${ASNS} -> /backup/${ASNS}"
-                kubectl exec -n "${NS}" "${POD}" -c absctl -- \
-                  absctl backup \
-                    --host "${SEED}" --port 3000 \
-                    --namespace "${ASNS}" \
-                    --directory "/backup/${ASNS}" \
-                    --remove-files \
-                    --parallel 4
-              done
+                echo "Namespace ${ASNS}"
 
-              # --- FLUSH THE PAGE CACHE — DO NOT REMOVE -------------------
-              # CRITICAL. A CSI/EBS snapshot captures the BLOCK DEVICE and
-              # bypasses the OS page cache. absctl returns as soon as its writes
-              # are in the page cache, so without this sync the snapshot can
-              # capture .asb files as ZERO LENGTH. The result is a restore point
-              # that looks perfectly healthy, exports almost nothing, and
-              # restores no data at all — silent, total data loss.
-              echo "--------------------------------------------------------"
-              echo "Flushing the page cache to the block device (sync)..."
-              kubectl exec -n "${NS}" "${POD}" -c absctl -- sync
-              sleep 5
+                # --- Derive the chain state from the PVC ------------------
+                # The directory names ARE the chain state: no marker file, no
+                # external database. full-<stamp> and incr-<stamp> sort
+                # chronologically, so the newest full plus the incrementals
+                # after it is the current chain.
+                DIRS=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                  sh -c "ls -1 /backup/${ASNS} 2>/dev/null || true" \
+                  | tr -d '\r' | grep -E '^(full|incr)-[0-9]{8}T[0-9]{6}Z$' | sort || true)
+                NEWEST_FULL=$(echo "${DIRS}" | grep '^full-' | tail -1 || true)
+                NEWEST_ANY=$(echo "${DIRS}" | tail -1 || true)
 
-              # --- Verify AFTER the sync ----------------------------------
-              # Count files AND assert none is empty. Counting files alone does
-              # not catch the un-synced case, because the (empty) files exist.
-              TOTAL_KIB=0
-              for ASNS in ${NAMESPACES}; do
-                FILES=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
-                  sh -c "ls -1 /backup/${ASNS}/*.asb 2>/dev/null | wc -l" | tr -d '\r ')
-                if [ -z "${FILES}" ] || [ "${FILES}" -eq 0 ] 2>/dev/null; then
-                  echo "ERROR: no .asb files produced for namespace ${ASNS}."
-                  exit 1
+                if [ -z "${NEWEST_FULL}" ]; then
+                  KIND="full"
+                  echo "No full backup on the volume -> FULL"
+                else
+                  FULLSTAMP="${NEWEST_FULL#full-}"
+                  # `|| true` is essential: with errexit+pipefail a grep that
+                  # matches nothing (a chain with no incrementals yet) would
+                  # otherwise abort the whole phase.
+                  INCRS=$(echo "${DIRS}" | { grep '^incr-' || true; } \
+                    | awk -v f="${FULLSTAMP}" '{ s=$0; sub(/^incr-/,"",s); if (s > f) print }' | wc -l | tr -d ' ')
+                  echo "Newest full=${NEWEST_FULL}, incrementals since it=${INCRS}, limit=${MAXINCR}"
+                  if [ "${INCRS}" -ge "${MAXINCR}" ]; then
+                    KIND="full"
+                    echo "Chain limit reached -> FULL (and prune)"
+                  else
+                    KIND="incr"
+                  fi
                 fi
-                EMPTY=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
-                  sh -c "n=0; for f in /backup/${ASNS}/*.asb; do [ -s \"\$f\" ] || n=\$((n+1)); done; echo \$n" \
+
+                NEWDIR="${KIND}-${STAMP}"
+                MODAFTER=""
+                if [ "${KIND}" = "incr" ]; then
+                  MODAFTER=$(stamp_to_absctl "${NEWEST_ANY#*-}")
+                  echo "INCREMENTAL since ${MODAFTER} -> /backup/${ASNS}/${NEWDIR}"
+                else
+                  echo "FULL -> /backup/${ASNS}/${NEWDIR}"
+                fi
+
+                # Pre-create the directory. absctl writes NOTHING - not even the
+                # directory - when an incremental finds no changed records, so
+                # without this the chain counter would never advance and the
+                # forced full would never trigger.
+                kubectl exec -n "${NS}" "${POD}" -c absctl -- mkdir -p "/backup/${ASNS}/${NEWDIR}"
+
+                if [ "${KIND}" = "incr" ]; then
+                  OUT=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                    absctl backup --host "${SEED}" --port 3000 \
+                      --namespace "${ASNS}" --directory "/backup/${ASNS}/${NEWDIR}" \
+                      --modified-after "${MODAFTER}" --parallel 4 2>&1)
+                else
+                  OUT=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                    absctl backup --host "${SEED}" --port 3000 \
+                      --namespace "${ASNS}" --directory "/backup/${ASNS}/${NEWDIR}" \
+                      --parallel 4 2>&1)
+                fi
+                echo "${OUT}" | grep -E 'Records Read|Bytes Written|Files Written|Duration' || true
+                RECS=$(echo "${OUT}"  | awk '/Records Read:/{print $3; exit}')
+                WROTE=$(echo "${OUT}" | awk '/Bytes Written:/{print $3; exit}')
+                [ -z "${RECS}" ]  && RECS=0
+                [ -z "${WROTE}" ] && WROTE=0
+
+                # --- FLUSH THE PAGE CACHE — DO NOT REMOVE ------------------
+                # A CSI/EBS snapshot captures the BLOCK DEVICE and bypasses the
+                # OS page cache. absctl returns as soon as its writes are in
+                # cache, so without this sync the snapshot can capture .asb
+                # files as ZERO LENGTH: a restore point that looks healthy,
+                # exports almost nothing and restores no data at all.
+                kubectl exec -n "${NS}" "${POD}" -c absctl -- sync
+                sleep 3
+
+                # --- Verify what absctl claimed is actually on the device ---
+                # Comparing absctl's reported byte count against the on-disk sum
+                # detects the un-synced case precisely, and does not
+                # misinterpret a legitimately empty incremental (0 records ->
+                # 0 files) as a failure.
+                ONDISK=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                  sh -c "find /backup/${ASNS}/${NEWDIR} -type f -name '*.asb' -exec cat {} + 2>/dev/null | wc -c" \
                   | tr -d '\r ')
-                if [ "${EMPTY}" != "0" ]; then
-                  echo "ERROR: ${EMPTY} of ${FILES} .asb files for namespace ${ASNS} are EMPTY after sync."
-                  kubectl exec -n "${NS}" "${POD}" -c absctl -- ls -l "/backup/${ASNS}" || true
+                [ -z "${ONDISK}" ] && ONDISK=0
+                echo "absctl reported ${WROTE} bytes, on device after sync: ${ONDISK} bytes"
+                if [ "${WROTE}" -gt 0 ] && [ "${ONDISK}" -eq 0 ]; then
+                  echo "ERROR: absctl wrote ${WROTE} bytes but the device holds 0 — the sync did not take effect."
+                  kubectl exec -n "${NS}" "${POD}" -c absctl -- ls -l "/backup/${ASNS}/${NEWDIR}" || true
                   exit 1
                 fi
+                if [ "${KIND}" = "full" ] && [ "${RECS}" -eq 0 ]; then
+                  echo "ERROR: a FULL backup of ${ASNS} captured 0 records."
+                  exit 1
+                fi
+
+                # --- Prune superseded chain members after a full -----------
+                # Only after the new full is verified on the device. Pruning the
+                # live volume never affects existing restore points, which are
+                # immutable snapshots.
+                if [ "${KIND}" = "full" ]; then
+                  for D in ${DIRS}; do
+                    [ "${D}" = "${NEWDIR}" ] && continue
+                    echo "  pruning superseded ${D}"
+                    kubectl exec -n "${NS}" "${POD}" -c absctl -- rm -rf "/backup/${ASNS}/${D}"
+                  done
+                  kubectl exec -n "${NS}" "${POD}" -c absctl -- sync
+                fi
+
                 KIB=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
                   sh -c "du -sk /backup/${ASNS} | cut -f1" | tr -d '\r ')
-                echo "OK: namespace ${ASNS} -> ${FILES} file(s), ${KIB} KiB, none empty"
+                echo "OK: ${ASNS} ${KIND} — ${RECS} records, namespace total now ${KIB} KiB"
                 TOTAL_KIB=$((TOTAL_KIB + KIB))
+                SUMMARY="${SUMMARY}${ASNS}:${KIND}:${RECS}recs "
               done
 
               echo "--------------------------------------------------------"
-              echo "Total dump size on the keeper PVC: ${TOTAL_KIB} KiB"
+              echo "Chain state on the keeper PVC:"
+              kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                sh -c 'for d in /backup/*/; do echo "  $d"; ls -1 "$d" 2>/dev/null | sed "s/^/    /"; done' || true
+              echo "Total on the keeper PVC: ${TOTAL_KIB} KiB"
+              echo "Summary: ${SUMMARY}"
               echo "Keeper PVC is synced and ready for the Kasten snapshot."
 
               kando output keeper     "${KEEPER}"
@@ -209,6 +303,7 @@ actions:
               kando output cluster    "${CR}"
               kando output namespaces "${NAMESPACES}"
               kando output dumpKiB    "${TOTAL_KIB}"
+              kando output summary    "${SUMMARY}"
 
   # =========================================================================
   # restorePosthook — runs AFTER Kasten restores the keeper PVC and metadata.
@@ -277,36 +372,51 @@ actions:
               fi
               echo "Namespaces present in the dump: ${NAMESPACES}"
 
-              # --- PRE-FLIGHT: validate EVERY dump BEFORE touching the DB ---
-              # Ordering matters enormously here. The restore truncates each
-              # namespace before repopulating it, so a dump problem discovered
-              # mid-loop would leave already-truncated namespaces EMPTY —
-              # turning a failed restore into data loss. Validate everything
-              # first and abort before a single record is deleted.
-              #
-              # The failure this catches: a backup taken without a page-cache
-              # sync produces .asb files that exist but are zero length.
+              # --- PRE-FLIGHT: resolve and validate every chain BEFORE the DB ---
+              # Ordering matters enormously. The restore truncates each namespace
+              # before repopulating it, so a problem discovered mid-loop would
+              # leave already-truncated namespaces EMPTY — turning a failed
+              # restore into data loss. Resolve and validate everything first,
+              # and abort before a single record is deleted.
+              CHAINS=""
               for ASNS in ${NAMESPACES}; do
-                CNT=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
-                  sh -c "ls -1 /backup/${ASNS}/*.asb 2>/dev/null | wc -l" | tr -d '\r ')
-                if [ -z "${CNT}" ] || [ "${CNT}" -eq 0 ] 2>/dev/null; then
-                  echo "ERROR: no .asb files for namespace ${ASNS} in this restore point."
-                  exit 1
-                fi
-                EMPTY=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
-                  sh -c "n=0; for f in /backup/${ASNS}/*.asb; do [ -s \"\$f\" ] || n=\$((n+1)); done; echo \$n" \
-                  | tr -d '\r ')
-                if [ "${EMPTY}" != "0" ]; then
-                  echo "ERROR: ${EMPTY} of ${CNT} .asb file(s) for ${ASNS} are EMPTY."
-                  echo "       This restore point is not usable. The backup was almost"
-                  echo "       certainly taken without a page-cache sync."
-                  echo "       ABORTING BEFORE ANY TRUNCATE — no data has been touched."
+                DIRS=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                  sh -c "ls -1 /backup/${ASNS} 2>/dev/null || true" \
+                  | tr -d '\r' | grep -E '^(full|incr)-[0-9]{8}T[0-9]{6}Z$' | sort || true)
+                NEWEST_FULL=$(echo "${DIRS}" | grep '^full-' | tail -1 || true)
+                if [ -z "${NEWEST_FULL}" ]; then
+                  echo "ERROR: namespace ${ASNS} has no full backup on the volume — nothing restorable."
                   kubectl exec -n "${NS}" "${POD}" -c absctl -- ls -l "/backup/${ASNS}" || true
                   exit 1
                 fi
-                echo "  ${ASNS}: ${CNT} file(s), none empty — OK"
+                FULLSTAMP="${NEWEST_FULL#full-}"
+                # The chain is the newest full plus every incremental after it,
+                # in chronological order. Anything older is superseded.
+                CHAIN="${NEWEST_FULL}"
+                for D in $(echo "${DIRS}" | { grep '^incr-' || true; }); do
+                  DS="${D#incr-}"
+                  if [ "${DS}" \> "${FULLSTAMP}" ]; then CHAIN="${CHAIN},${D}"; fi
+                done
+                echo "  ${ASNS}: chain = ${CHAIN}"
+
+                # A chain member must not contain zero-length .asb files: that is
+                # the signature of a backup taken without a page-cache sync. An
+                # EMPTY directory is fine — an incremental that found no changed
+                # records legitimately writes no files.
+                for D in $(echo "${CHAIN}" | tr ',' ' '); do
+                  BAD=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                    sh -c "n=0; for f in /backup/${ASNS}/${D}/*.asb; do [ -e \"\$f\" ] || continue; [ -s \"\$f\" ] || n=\$((n+1)); done; echo \$n" \
+                    | tr -d '\r ')
+                  if [ "${BAD}" != "0" ]; then
+                    echo "ERROR: ${ASNS}/${D} contains ${BAD} zero-length .asb file(s)."
+                    echo "       This restore point is not usable — the backup was taken without a sync."
+                    echo "       ABORTING BEFORE ANY TRUNCATE — no data has been touched."
+                    exit 1
+                  fi
+                done
+                CHAINS="${CHAINS}${ASNS}=${CHAIN} "
               done
-              echo "Pre-flight validation passed for all namespaces."
+              echo "Pre-flight validation passed. Chains: ${CHAINS}"
 
               # --- Wait for the Aerospike cluster -------------------------
               # The Aerospike device PVCs are excluded from the restore point, so
@@ -346,17 +456,19 @@ actions:
                 | grep '^cluster_size=' | cut -d= -f2 | tr -d '\r' || true)
               echo "cluster_integrity=${INTEG:-unknown} cluster_size=${CSIZE:-unknown}"
 
-              # --- Truncate, then restore, per namespace ------------------
-              for ASNS in ${NAMESPACES}; do
+              # --- Truncate, then replay the chain, per namespace ---------
+              for ENTRY in ${CHAINS}; do
+                ASNS="${ENTRY%%=*}"
+                CHAIN="${ENTRY#*=}"
                 echo "--------------------------------------------------------"
-                echo "Namespace ${ASNS}"
+                echo "Namespace ${ASNS}, chain ${CHAIN}"
 
                 BEFORE=$(kubectl exec -n "${NS}" "${SRV_POD}" -c aerospike-server -- \
                   asinfo -v "namespace/${ASNS}" 2>/dev/null | tr ';' '\n' \
                   | grep '^objects=' | cut -d= -f2 | tr -d '\r' || echo "n/a")
                 echo "objects before truncate: ${BEFORE}"
 
-                echo "Truncating ${ASNS} (this is what removes records absent from the dump)..."
+                echo "Truncating ${ASNS} (this is what removes records absent from the backup)..."
                 OUT=$(kubectl exec -n "${NS}" "${SRV_POD}" -c aerospike-server -- \
                   asinfo -v "truncate-namespace:namespace=${ASNS}" | tr -d '\r')
                 echo "asinfo response: ${OUT}"
@@ -366,19 +478,27 @@ actions:
                 esac
                 sleep 5
 
-                echo "Restoring ${ASNS} from /backup/${ASNS} ..."
-                # --namespace is REQUIRED on restore. The help text describes it
-                # as "used to restore to a different namespace
-                # (source-ns,destination-ns)", which reads as optional, but
-                # omitting it fails with:
-                #   failed to validate config: namespace is required
-                # Passing the bare namespace restores it back to itself.
-                kubectl exec -n "${NS}" "${POD}" -c absctl -- \
-                  absctl restore \
-                    --host "${SEED}" --port 3000 \
-                    --namespace "${ASNS}" \
-                    --directory "/backup/${ASNS}" \
-                    --parallel 4
+                # Replay OLDEST FIRST: the full, then each incremental in
+                # chronological order, so a record updated several times in the
+                # chain ends up at its newest version.
+                for D in $(echo "${CHAIN}" | tr ',' ' '); do
+                  HAS=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                    sh -c "ls -1 /backup/${ASNS}/${D}/*.asb 2>/dev/null | wc -l" | tr -d '\r ')
+                  if [ -z "${HAS}" ] || [ "${HAS}" -eq 0 ]; then
+                    echo "  ${D}: empty (incremental with no changed records) — skipping"
+                    continue
+                  fi
+                  echo "  restoring ${D} ..."
+                  # --namespace is REQUIRED on restore. The help text presents it
+                  # as remapping (source-ns,destination-ns), which reads as
+                  # optional, but omitting it fails with
+                  #   failed to validate config: namespace is required
+                  kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                    absctl restore --host "${SEED}" --port 3000 \
+                      --namespace "${ASNS}" \
+                      --directory "/backup/${ASNS}/${D}" \
+                      --parallel 4 2>&1 | grep -E 'Records Read|Inserted Records|Expired|Errors' || true
+                done
 
                 AFTER=$(kubectl exec -n "${NS}" "${SRV_POD}" -c aerospike-server -- \
                   asinfo -v "namespace/${ASNS}" 2>/dev/null | tr ';' '\n' \

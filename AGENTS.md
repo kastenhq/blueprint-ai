@@ -300,8 +300,18 @@ Then:
    ```bash
    aws s3 ls "s3://<BUCKET>/${PREFIX}/" --recursive --summarize | tail -3
    ```
+   > ⚠️ **Do not rely on `ExportAction.status.progressDetails.transferredBytes`.** Kasten discards
+   > `progressDetails` when an action completes, so a finished ExportAction reports only `state`,
+   > `progress` and timestamps. That figure has to be sampled *while the export is still running*.
+   > Repository growth on the object store is the retained, verifiable number — use it.
+   >
+   > Sum **both** prefixes Kasten writes: `migration/repo/<namespace-uid>/` holds the bulk (the
+   > exported volume data) and `migration/<policy-name>/kopia/` is a smaller companion repository.
 4. **Introduce a representative change** in the database — a realistic delta, not a rewrite. For
    example modify or add ~1% of records.
+   > ⚠️ **Make sure the generated data is actually random.** Bulk-load tools often write an identical
+   > value to every record by default (`asbench` needs `--random`, for instance). Identical records
+   > deduplicate at absurd ratios and produce a meaningless measurement that looks like a triumph.
 5. Run backup **and** export again, wait for completion.
 6. **Measure again.**
 

@@ -2,7 +2,8 @@
 
 Kasten blueprint for Aerospike Enterprise clusters managed by the Aerospike Kubernetes Operator
 (AKO). A keeper StatefulSet holds a permanent PVC; `backupPrehook` uses **`absctl`** to write a
-complete logical dump of every Aerospike namespace onto it, and Kasten snapshots that PVC.
+logical dump of every Aerospike namespace onto it — a full, or an incremental against the current
+chain — and Kasten snapshots that PVC.
 
 > ⚠️ **This directory is an example, not a general-purpose solution.** It encodes assumptions about
 > the AKO version, the CR layout, the storage class, the absence of Aerospike security, the
@@ -10,10 +11,11 @@ complete logical dump of every Aerospike namespace onto it, and Kasten snapshots
 > against. Copy the directory, rename it, adapt it, then re-run Steps 2–6 to validate it. See the
 > ownership disclaimer in the [repository README](../README.md).
 
-> 🛑 **Read [Export deduplication — measured](#export-deduplication--measured) before adopting
-> this.** The design rewrites the whole dump every run on the assumption that Kasten's Kopia export
-> deduplicates it. **Measurement shows it does not.** Every backup exports the full dump. That is
-> fine for small and medium namespaces and disqualifying at TB scale.
+> 📉 **Incremental chains are what make this viable.** A full dump every run exports the whole
+> dataset every time — Kopia cannot deduplicate absctl output because it is not byte-stable. With
+> incremental chains the export drops by ~69x. Set the chain length with one env var on the keeper:
+> see [Incremental chains](#incremental-chains) and the measured figures in
+> [Export cost — measured](#export-cost--measured).
 
 ---
 
@@ -74,41 +76,95 @@ and retention. Running both means two schedulers and two retention regimes over 
 |---|---|---|
 | Scheduling | its own cron | Kasten only |
 | Retention | its own | Kasten only |
-| Chain state | tracked per routine | none — every dump is complete |
-| Deleted records resurrected on restore | **yes**, via incremental chains | **never** |
+| Chain state | internal to the service | the directory names on the PVC — inspectable with `ls` |
+| Chain length control | two cron expressions | one env var on the keeper |
+| Deleted records resurrected | yes, bounded by its full interval | same risk, bounded by `ABSCTL_INCREMENTALS_BEFORE_FULL` (`0` removes it) |
 | Namespace list | hand-maintained, can silently miss one | discovered from the live cluster |
 | Moving parts | Deployment + ConfigMap + Service + PVC | StatefulSet + PVC |
 
-Two failure classes disappear entirely with this design:
+What genuinely improves:
 
-- **No incremental chain, so no resurrection.** With ABS incrementals, a record deleted between a
-  full and an incremental comes back on restore, because incrementals carry no deletions. (Durable
-  deletes do **not** help: the incremental after a durable delete produced no output at all.) Here
-  every restore point is a self-contained full dump, so a restore returns exactly what was backed
-  up.
+- **No second scheduler and no second retention policy.** Kasten decides when a backup happens and
+  how long restore points live. The keeper's env var only decides how long a chain may get before a
+  full is forced, which is a storage-layout concern rather than a lifecycle one.
+- **The chain state is a directory listing.** You can see exactly what a restore would replay with
+  `ls /backup/<namespace>`. There is no service to interrogate and nothing to get out of sync.
 - **No namespace list to get wrong.** The blueprint runs `asinfo -v namespaces` against the live
   cluster, so adding a namespace to the database protects it automatically. There is no config field
   that can silently omit one.
 
+What does **not** improve: the deleted-record risk is inherent to logical incrementals, not to ABS.
+It applies here too, and `ABSCTL_INCREMENTALS_BEFORE_FULL=0` is the only way to eliminate it —
+see [Incremental chains](#incremental-chains).
+
 ---
 
-## Export deduplication — measured
+## Incremental chains
 
-The design's premise was that rewriting the whole dump every run is cheap because Kasten's export is
-content-addressed and deduplicated by Kopia. **That premise is false for `absctl`.** Measured with
-the procedure in [Step 6 of AGENTS.md](../AGENTS.md#step-6--measure-export-deduplication-efficiency),
-on 100,011 records (~200-byte random values), dump size **27.4 MiB**:
+`absctl` has no chain state of its own — `--modified-after <YYYY-MM-DD_HH:MM:SS>` is supplied by the
+caller. This blueprint keeps that state **entirely in the directory names on the keeper PVC**, so
+there is no marker file, no ConfigMap and nothing that can drift from reality:
 
-| Database change | Dump bytes differing on the PVC | Kopia repo growth on export |
-|---|---|---|
-| **none at all** | ~100% (different md5) | **+23,509,413 B** (22.4 MiB) |
-| **1%** of records | **82.9%** | **+23,521,634 B** (22.4 MiB) |
-| **50%** of records | **86.5%** | ≈ full dump |
+```
+/backup/<namespace>/full-20260826T104218Z/
+/backup/<namespace>/incr-20260826T104714Z/
+/backup/<namespace>/incr-20260826T105003Z/
+```
 
-### Why: `absctl` output is not deterministic
+The names sort chronologically, so the current chain is *the newest `full-` plus every `incr-` after
+it*. Counting the incrementals decides whether the next run is another incremental or a forced full,
+and the newest directory's stamp becomes the next `--modified-after`. Reading the volume is the whole
+of the state machine.
 
-Two consecutive dumps of **identical, unchanged data** produce different content — at
-`--parallel 4` *and* at `--parallel 1`:
+### The one knob
+
+```yaml
+# abs-keeper.yaml, on the keeper container
+env:
+  - name: ABSCTL_INCREMENTALS_BEFORE_FULL
+    value: "3"        # full, incr, incr, incr, then full again (and prune)
+                      # 0 = never take an incremental; every run is a full
+```
+
+The blueprint reads it from the **running** pod (`kubectl exec -- printenv`), so changing the value
+and rolling the StatefulSet is enough — no blueprint edit. When a full is taken, every superseded
+`full-`/`incr-` directory for that namespace is pruned. Pruning the live volume never affects
+existing restore points, which are immutable snapshots.
+
+> ⚠️ **Incrementals reintroduce the deleted-record risk.** absctl incrementals carry changed and new
+> records, never deletions, so a record deleted *after* the last full can be resurrected by a restore
+> of that chain. The next full heals it, which makes `ABSCTL_INCREMENTALS_BEFORE_FULL` the maximum
+> exposure window. Durable deletes do **not** help — an incremental after a durable delete produced
+> no output at all. Set `0` if deletions must never come back (GDPR erasure and similar).
+
+A detail worth knowing if you modify this: absctl writes **nothing at all — not even the
+directory** — when an incremental finds no changed records. The blueprint pre-creates the directory
+so the chain counter still advances and the forced full still triggers on schedule.
+
+---
+
+## Export cost — measured
+
+Measured with [Step 6 of AGENTS.md](../AGENTS.md#step-6--measure-export-deduplication-efficiency) on
+100,012 records (~200-byte random values), 1% of records churned before every run,
+`ABSCTL_INCREMENTALS_BEFORE_FULL=3`. Five consecutive policy runs:
+
+| Run | Kind | Kopia repo growth | Chain after the run |
+|---|---|---|---|
+| 1 | **full** | **23,526,001 B** (22.4 MiB) | `full-102609Z` |
+| 2 | incr | **341,899 B** (334 KiB) | + `incr-102956Z` |
+| 3 | incr | **341,899 B** | + `incr-103336Z` |
+| 4 | incr | **368,928 B** | + `incr-103719Z` |
+| 5 | **full** | **23,525,933 B** | `full-104218Z` — **all earlier members pruned** |
+
+**An incremental export costs ~69x less than a full.** That is the difference between this blueprint
+being usable at scale and not.
+
+### Why a full costs the whole dump
+
+A full dump cannot be deduplicated against the previous full, because **absctl output is not
+byte-stable**. Two consecutive dumps of *identical, unchanged* data differ — at `--parallel 4` and at
+`--parallel 1`:
 
 ```
 --parallel 4:  run A md5 = 0ae0a39ff38543be583766521956d288
@@ -117,27 +173,32 @@ Two consecutive dumps of **identical, unchanged data** produce different content
                run B md5 = f7bab52ede5d081c4d21cdf789451654   => NOT deterministic
 ```
 
-Record scan order varies between runs, so the byte stream is effectively new every time and
-content-defined chunking has nothing to match. The export therefore pays the full dump on **every**
-backup, regardless of how little changed.
+Record scan order varies between runs, so ~83% of the dump's bytes differ even after a 1% change and
+content-defined chunking has nothing to match. A control confirms the pipeline itself is faithful:
+50 MiB of `/dev/urandom` written to the keeper PVC grew the repository by 52,443,164 bytes, 1:1.
 
-A control proves the measurement is sound rather than the pipeline being broken: writing 50 MiB of
-`/dev/urandom` onto the keeper PVC grew the repository by **52,443,164 bytes** — 1:1, as it must.
+Incrementals sidestep this entirely — each one is a **new, small, never-rewritten directory**, so the
+layout is append-only and Kasten's export only ships the new member.
 
-### What this means for adoption
+### Backup duration
 
-- **Small / medium namespaces** — fine. A full export per cycle of a few GB is unremarkable, and you
-  get exact restores, no chain, no resurrection risk, and near-zero operational surface.
-- **TB-scale namespaces** — **do not use this as-is.** You would export the entire dataset every
-  cycle. Prefer ABS's append-only chain layout (new timestamped directories, existing files never
-  rewritten), which genuinely deduplicates — accepting the deleted-record resurrection risk — or
-  wait for the partitioned variant.
-- **Untested idea worth trying first:** give each `absctl` invocation an explicit
-  `--partition-list <start>-<count>`. Records would then come from a fixed partition range,
-  plausibly in digest order, which might make output deterministic and restore deduplication. That
-  also lines up with a partitioned keeper (one PVC and one partition range per StatefulSet replica).
+absctl reads **only the changed records** — it does not scan the whole namespace:
 
----
+| | Records read | Bytes written | absctl duration |
+|---|---|---|---|
+| full | 100,012 | 28,702,695 | ~143 ms |
+| incremental (1% churn) | **1,000** | 288,129 | **~13 ms** |
+
+So the tool itself is ~10x faster. The Kasten **BackupAction** duration, however, ranged 71–152 s
+across the five runs with no correlation to full vs incremental: at this dataset size it is dominated
+by orchestration — snapshot creation, pod scheduling, export setup — and absctl's contribution is
+milliseconds. Expect the incremental gain to become visible in the action duration only once the
+dataset is large enough for the scan to dominate.
+
+> **Measuring `transferredBytes` yourself:** Kasten **discards `status.progressDetails` when an
+> action completes**, so a completed ExportAction shows only `state`, `progress` and timestamps. The
+> figure has to be sampled *while the export is running*, or derived from the Kopia repository growth
+> on the object store, which is what the table above uses because it is retained and verifiable.
 
 ## Prerequisites
 
@@ -266,6 +327,8 @@ kubectl rollout status statefulset/aerospike-backup-keeper -n aerospike-test
   not for a retention chain.
 - The volumeClaimTemplate is labelled `app=aerospike-backup-keeper`, deliberately **not**
   `app=aerospike-cluster`, which is what the policy excludes.
+- `ABSCTL_INCREMENTALS_BEFORE_FULL` controls the chain length — see
+  [Incremental chains](#incremental-chains). The PVC must hold a whole chain, not one dump.
 
 ### 2.6 Create test data
 
@@ -342,8 +405,8 @@ kubectl apply -f blueprintbinding.yaml
 
 | Action | Phase | What it does |
 |---|---|---|
-| `backupPrehook` | `absctlBackup` | Waits for the keeper pod. Discovers the Aerospike server pod (`app=aerospike-cluster`), the cluster name (`aerospike.com/cr` label → headless Service = seed host) and the namespace list (`asinfo -v namespaces`). Runs `absctl backup --remove-files` per namespace, then **`sync`**, then asserts no `.asb` file is empty. Emits `keeper`, `namespace`, `cluster`, `namespaces`, `dumpKiB`. |
-| `restorePosthook` | `absctlRestore` | Waits for the restored keeper pod. Enumerates namespaces **from the PVC**. **Pre-flight-validates every dump before touching the database.** Waits for the Aerospike cluster and `cluster_integrity=true`. Then per namespace: `truncate-namespace`, then `absctl restore`. |
+| `backupPrehook` | `absctlBackup` | Waits for the keeper pod. Discovers the Aerospike server pod (`app=aerospike-cluster`), the cluster name (`aerospike.com/cr` label → headless Service = seed host) and the namespace list (`asinfo -v namespaces`). Reads `ABSCTL_INCREMENTALS_BEFORE_FULL` from the running keeper, derives the chain state from the PVC directory names, and takes a **full** or an **incremental** (`--modified-after`) into a new timestamped directory. Then **`sync`**, verifies absctl's reported byte count landed on the device, and **prunes superseded chain members after a full**. Emits `keeper`, `namespace`, `cluster`, `namespaces`, `dumpKiB`, `summary`. |
+| `restorePosthook` | `absctlRestore` | Waits for the restored keeper pod. Enumerates namespaces **from the PVC** and resolves each one's chain (newest full + later incrementals). **Pre-flight-validates every chain before touching the database.** Waits for the Aerospike cluster and `cluster_integrity=true`. Then per namespace: `truncate-namespace`, then replays the chain **oldest first** so the newest version of a record wins. |
 | `delete` | `absctlDelete` | Logs the artifact values. Nothing external to delete. |
 
 There is deliberately **no `backupPosthook`**: the keeper PVC is permanent, so there is nothing to
@@ -367,8 +430,10 @@ restores no data at all — silent, total data loss. Observed directly during de
 0        3_test_3.asb
 ```
 
-Counting files is not enough to detect this, because the (empty) files exist. The blueprint asserts
-**non-empty** after the sync.
+Counting files is not enough to detect this, because the (empty) files exist. The blueprint compares
+**absctl's own reported byte count against the on-device sum after the sync**, which detects the
+un-synced case precisely without misreading a legitimately empty incremental (0 changed records → 0
+files) as a failure.
 
 ### Pre-flight validation must precede the truncate
 
@@ -510,41 +575,52 @@ restore point. The blueprint waits up to 10 minutes for the cluster to answer `a
 
 ### Verified end-to-end result
 
-Two Aerospike namespaces (`test` with 100k records plus a `demo` set, and `bar`):
+Two Aerospike namespaces (`test` with 100k records plus a `demo` set, and `bar`).
+
+**Chain behaviour** — five consecutive policy runs with `ABSCTL_INCREMENTALS_BEFORE_FULL=3`
+produced exactly `full, incr, incr, incr, full`, and the fifth run pruned every earlier member. See
+[Export cost — measured](#export-cost--measured).
+
+**Chain replay ordering** — a key was given a different value in each of two incrementals, then
+deleted, with an extra record added that was never backed up:
 
 ```bash
-# after the backup, corrupt both namespaces
-./test-data.sh delete-one key4          # remove a known record
-./test-data.sh add-one key999           # add a record NOT in the backup
-ASNS=bar ./test-data.sh delete-one key7
-asinfo -v "truncate:namespace=test;set=bench"   # wipe the 100k records
+# incremental 1
+INSERT INTO test.demo (PK, id, name, city) VALUES ('keyCHAIN', 1, 'chain', 'v1')   # run -> incr
+# incremental 2
+INSERT INTO test.demo (PK, id, name, city) VALUES ('keyCHAIN', 2, 'chain', 'v2')   # run -> incr
+# corrupt
+DELETE FROM test.demo WHERE PK='keyCHAIN'
+./test-data.sh add-one keyBOGUS        # a record that is NOT in any backup
 ```
+
+Chain on the PVC: `full-104218Z`, `incr-104714Z`, `incr-105003Z`.
 
 | | Expected | Actual after restore |
 |---|---|---|
-| `test.demo` | key1–key10, `key999` gone | ✅ exactly key1–key10 |
-| `bar.demo` | key1–key10 restored | ✅ restored |
-| `test` objects/node | ~66k (bench restored) | ✅ 66,397 |
+| `keyCHAIN` | `v2` — newest of the two incrementals | ✅ `v2` |
+| `keyBOGUS` | removed (never backed up) | ✅ absent |
+| `test.demo` | key1–key10 + keyCHAIN + keyINC1/2 | ✅ |
+| `bar.demo` | key1–key10 | ✅ |
 
-`key999` being **removed** is the point: it was never in the backup, and only the truncate phase can
-delete it. An additive restore alone would have left it behind.
+`keyCHAIN` resolving to `v2` proves the chain is replayed oldest-first so the newest version of a
+record wins. `keyBOGUS` being removed proves the truncate phase runs — an additive restore alone
+would have left it behind.
 
----
-
-## Step 6 — Export deduplication measurement
+## Step 6 — Export cost measurement
 
 The procedure is defined in
 [Step 6 of AGENTS.md](../AGENTS.md#step-6--measure-export-deduplication-efficiency);
 [measure-dedup.sh](measure-dedup.sh) implements it for this blueprint.
 
 ```bash
-./measure-dedup.sh size            # current Kopia repo size on S3
-./measure-dedup.sh dump            # current dump size on the keeper PVC
+./measure-dedup.sh size            # current Kopia repo size on the object store
+./measure-dedup.sh dump            # current chain size on the keeper PVC
 ./measure-dedup.sh run <name>      # backup + export, wait for both
 ./measure-dedup.sh churn <n>       # rewrite n records with fresh random values
 ```
 
-Two things that make or break the measurement:
+Four things that make or break the measurement:
 
 - **The dataset must be large enough.** The Step 2 dataset (~1KB) is useless; Kopia metadata
   dominates. Load ~100k records with `asbench` first:
@@ -553,20 +629,18 @@ Two things that make or break the measurement:
           --keys 100000 --object-spec S200 --workload I --threads 16 --random
   ```
 - **`--random` is mandatory.** Without it `asbench` writes the *same* value to every record, which
-  deduplicates ~200:1 and produces a completely meaningless result. This cost real debugging time.
+  deduplicates ~200:1 and makes the result meaningless. This cost real debugging time.
+- **Sum both export prefixes.** The namespace repository holds the bulk, with a smaller per-policy
+  companion:
+  ```
+  k10/<cluster-uid>/migration/repo/<namespace-uid>/   <- the exported volume data
+  k10/<cluster-uid>/migration/<policy-name>/kopia/    <- smaller companion repo
+  ```
+- **`transferredBytes` cannot be read after the fact.** Kasten discards
+  `status.progressDetails` when an action completes, so the repository growth on the object store is
+  the retained, verifiable figure — that is what the results table uses.
 
-Both export prefixes must be summed — the namespace repository holds the bulk, with a smaller
-per-policy companion:
-
-```
-k10/<cluster-uid>/migration/repo/<namespace-uid>/   <- the exported volume data
-k10/<cluster-uid>/migration/<policy-name>/kopia/    <- smaller companion repo
-```
-
-Results for this blueprint are in
-[Export deduplication — measured](#export-deduplication--measured).
-
----
+Results are in [Export cost — measured](#export-cost--measured).
 
 ## Troubleshooting
 
@@ -627,3 +701,7 @@ kubectl run debug -n aerospike-test --image=aerospike/aerospike-tools:13.0.2 --r
 > unadapted because Kasten is in charge of the backup lifecycle — we cannot ride both horses. The
 > image contains an `absctl` utility that can do all the primitive operations. Implement the simple
 > approach with absctl: full backup each time, but with an honest Kopia deduplication measurement.
+>
+> [after that measurement showed a full dump exports the whole dataset every run] Now work with
+> incremental mode. Put the number of incrementals before a full in an env variable on the keeper —
+> discovering how many incrementals were done should just be reading the filesystem in the PVC.

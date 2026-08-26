@@ -82,6 +82,26 @@ spec:
           # has to stay alive and hold the volume. Alpine base — /bin/sh only,
           # there is no bash in this image.
           command: ["/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"]
+          env:
+            # ---------------------------------------------------------------
+            # INCREMENTAL CHAIN LENGTH
+            # ---------------------------------------------------------------
+            # How many incremental backups to take before forcing a new full.
+            #   0  = never take an incremental; every run is a full dump
+            #   3  = full, incr, incr, incr, then full again (and prune)
+            #
+            # The blueprint reads this value from the RUNNING pod
+            # (kubectl exec -- printenv), so changing it here and rolling the
+            # StatefulSet is enough — the blueprint needs no edit.
+            #
+            # Trade-off. A longer chain transfers less on export, but widens the
+            # window in which a DELETED record can be resurrected by a restore:
+            # absctl incrementals carry changed and new records, never
+            # deletions. The next full "heals" that window, so this value is
+            # effectively the maximum exposure. Set 0 if deletions must never
+            # come back (GDPR erasure and similar).
+            - name: ABSCTL_INCREMENTALS_BEFORE_FULL
+              value: "3"
           volumeMounts:
             - name: backup
               mountPath: /backup
