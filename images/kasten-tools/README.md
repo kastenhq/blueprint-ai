@@ -42,6 +42,7 @@ working.
 | `8.5.7` | elasticsearch-eck-minio |
 | `8.5.9` | cnpg-barman-cloud, cockroachdb |
 | `8.5.13` | grafana-mimir |
+| `9.0.4` | aerospike-abs |
 
 `ARG KASTEN_VERSION` in the `Dockerfile` is the **most recently tested** version. It is always
 built even if no blueprint references it, and it is the only version also tagged `latest`. There is
@@ -71,9 +72,9 @@ Then build and push to **your own** registry:
 ```bash
 cd images/kasten-tools
 docker buildx build --platform linux/amd64,linux/arm64 \
-  --build-arg KASTEN_VERSION=8.5.13 \
+  --build-arg KASTEN_VERSION=9.0.4 \
   --build-arg KUBECTL_VERSION=1.32.0 \
-  -t <your-registry>/kasten-tools:8.5.13 --push .
+  -t <your-registry>/kasten-tools:9.0.4 --push .
 ```
 
 Always pass `--build-arg` explicitly rather than relying on the `Dockerfile` defaults — the
@@ -105,7 +106,7 @@ resources:
 images:
   - name: ghcr.io/kastenhq/blueprint-ai/kasten-tools
     newName: <your-registry>/kasten-tools
-    newTag: "8.5.13"
+    newTag: "9.0.4"
 ```
 
 If you run an air-gapped cluster, retargeting at the **cluster** level is usually better than

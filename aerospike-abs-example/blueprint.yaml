@@ -1,0 +1,417 @@
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: aerospike-absctl-blueprint
+  namespace: kasten-io
+# ---------------------------------------------------------------------------
+# Pattern 4 — Database dump on a permanent Keeper PVC, using absctl.
+# 
+# WHY NOT SNAPSHOT THE AEROSPIKE VOLUMES
+#   Aerospike stores namespace data on RAW BLOCK devices, one PVC per pod, and
+#   each node holds only its own subset of the 4096 partitions. An individual PVC
+#   snapshot IS crash-consistent within that one volume, but that is not enough:
+#     - No cross-volume/cross-node consistency. Aerospike's own docs state that
+#       snapshots are "consistent within a volume, but may not be consistent
+#       between volumes"; a 3-node namespace needs 6 volumes (nsdata + workdir)
+#       cut at the same instant, which plain CSI VolumeSnapshot does not provide.
+#     - Crash-consistent != no acknowledged writes lost. Writes sit in an 8MiB
+#       streaming write buffer until it fills or flush-max-ms expires, so a block
+#       snapshot cannot see them without commit-to-device.
+#     - System metadata (SMD) lives on the workdir volume and Aerospike documents
+#       it as NOT covered by snapshot-based backup.
+#   So the Aerospike device PVCs are EXCLUDED from the policy and absctl produces
+#   a logical dump onto a permanent keeper PVC that Kasten snapshots instead.
+#
+# WHY absctl AND NOT THE AEROSPIKE BACKUP SERVICE
+#   ABS owns cron schedules and retention. Inside a Kasten blueprint that means
+#   two schedulers and two retention regimes over the same bytes. absctl is the
+#   primitive: one invocation, one backup, no opinions about time. Kasten owns
+#   frequency and retention, exclusively.
+#
+# FULL DUMP EVERY RUN
+#   Each run rewrites the dump in place (--remove-files). Consequences:
+#     - no chain, no chain state, nothing to prune
+#     - every restore point is self-contained
+#     - deleted records can NEVER be resurrected (there is no incremental chain)
+#     - the namespace list is discovered from the live cluster, so a namespace
+#       cannot be silently left unprotected
+#   The apparent cost — rewriting the dump every run — is largely absorbed by
+#   Kasten's content-addressed Kopia export. That is measured, not assumed:
+#   see "Export deduplication" in README.md.
+#
+# EVERYTHING IS DISCOVERED, NOTHING IS CONFIGURED
+#   - keeper pod          : <StatefulSet name>-0 (deterministic, no discovery)
+#   - Aerospike server pod: label app=aerospike-cluster in the same namespace
+#   - seed host           : the aerospike.com/cr label on those pods gives the
+#                           AerospikeCluster name, which is also its headless
+#                           Service name
+#   - Aerospike namespaces: asinfo -v namespaces (backup) / the directories
+#                           present on the keeper PVC (restore)
+#   There is no ConfigMap, no annotation and no hardcoded hostname to drift.
+#
+# ONE IMAGE
+#   ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.4 provides kubectl, jq and
+#   kando. Phases run as KubeTask in kasten-io so they inherit the Kanister
+#   service account, which has the cross-namespace pods/exec permission this
+#   design needs. absctl lives in the keeper pod and asinfo in the Aerospike
+#   server pods; both are reached with kubectl exec, so no custom image is built
+#   and no tool is duplicated.
+# ---------------------------------------------------------------------------
+actions:
+
+  # =========================================================================
+  # backupPrehook — runs BEFORE Kasten snapshots the keeper PVC.
+  # Produces a complete logical dump of every Aerospike namespace.
+  # =========================================================================
+  backupPrehook:
+    outputArtifacts:
+      aerospikeBackup:
+        keyValue:
+          keeper: "{{ .Phases.absctlBackup.Output.keeper }}"
+          namespace: "{{ .Phases.absctlBackup.Output.namespace }}"
+          cluster: "{{ .Phases.absctlBackup.Output.cluster }}"
+          namespaces: "{{ .Phases.absctlBackup.Output.namespaces }}"
+          dumpKiB: "{{ .Phases.absctlBackup.Output.dumpKiB }}"
+    phases:
+      - func: KubeTask
+        name: absctlBackup
+        args:
+          namespace: kasten-io
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.4
+          command:
+            - bash
+            - -o
+            - errexit
+            - -o
+            - pipefail
+            - -c
+            - |
+              # Disable pathname expansion: namespace names are word-split below
+              # and must never be treated as globs.
+              set -f
+
+              KEEPER="{{ .Object.metadata.name }}"
+              NS="{{ .Object.metadata.namespace }}"
+              POD="${KEEPER}-0"
+
+              echo "Keeper StatefulSet=${KEEPER} pod=${POD} namespace=${NS}"
+
+              # --- Wait for the keeper pod ---------------------------------
+              # Poll rather than `kubectl wait`: wait errors out immediately if
+              # the pod does not exist YET, which happens whenever the keeper
+              # StatefulSet pod is being (re)created.
+              echo "Waiting for keeper pod ${POD} to be ready (timeout 5m)..."
+              ELAPSED=0
+              while [ "${ELAPSED}" -lt 300 ]; do
+                READY=$(kubectl get pod "${POD}" -n "${NS}" \
+                  -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true)
+                [ "${READY}" = "true" ] && break
+                sleep 5; ELAPSED=$((ELAPSED + 5))
+              done
+              if [ "${READY}" != "true" ]; then
+                echo "ERROR: keeper pod ${POD} did not become ready within 5m."
+                echo "The keeper is a StatefulSet, so its pod name is <name>-0."
+                kubectl get pods -n "${NS}" -l app=aerospike-backup-keeper || true
+                exit 1
+              fi
+              echo "Keeper pod ready."
+
+              # --- Discover the Aerospike cluster --------------------------
+              # AKO labels every server pod app=aerospike-cluster and records the
+              # AerospikeCluster name in aerospike.com/cr. That CR name is also
+              # the name of the headless Service, which is the seed host.
+              SRV_POD=$(kubectl get pods -n "${NS}" -l app=aerospike-cluster \
+                -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}{"\n"}{end}' \
+                | awk '$2=="true"{print $1; exit}')
+              if [ -z "${SRV_POD}" ]; then
+                echo "ERROR: no ready Aerospike server pod found in ${NS} (label app=aerospike-cluster)."
+                exit 1
+              fi
+              CR=$(kubectl get pod "${SRV_POD}" -n "${NS}" \
+                -o jsonpath='{.metadata.labels.aerospike\.com/cr}')
+              if [ -z "${CR}" ]; then
+                echo "ERROR: pod ${SRV_POD} has no aerospike.com/cr label; cannot derive the seed host."
+                exit 1
+              fi
+              SEED="${CR}.${NS}.svc.cluster.local"
+              echo "Aerospike server pod=${SRV_POD} cluster=${CR} seed=${SEED}:3000"
+
+              # --- Discover the Aerospike namespaces ----------------------
+              # Read from the live cluster, so a namespace added to the database
+              # is protected automatically with no configuration change.
+              NAMESPACES=$(kubectl exec -n "${NS}" "${SRV_POD}" -c aerospike-server -- \
+                asinfo -v namespaces | tr -d '\r' | tr ';' ' ')
+              if [ -z "${NAMESPACES// /}" ]; then
+                echo "ERROR: asinfo reported no Aerospike namespaces on ${CR}."
+                exit 1
+              fi
+              echo "Aerospike namespaces to back up: ${NAMESPACES}"
+
+              # --- Dump each namespace ------------------------------------
+              # --remove-files replaces the previous dump in place, so the PVC
+              # holds exactly one complete dump per namespace and the file paths
+              # are stable across runs (which is what lets Kopia deduplicate).
+              for ASNS in ${NAMESPACES}; do
+                echo "--------------------------------------------------------"
+                echo "Dumping namespace ${ASNS} -> /backup/${ASNS}"
+                kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                  absctl backup \
+                    --host "${SEED}" --port 3000 \
+                    --namespace "${ASNS}" \
+                    --directory "/backup/${ASNS}" \
+                    --remove-files \
+                    --parallel 4
+              done
+
+              # --- FLUSH THE PAGE CACHE — DO NOT REMOVE -------------------
+              # CRITICAL. A CSI/EBS snapshot captures the BLOCK DEVICE and
+              # bypasses the OS page cache. absctl returns as soon as its writes
+              # are in the page cache, so without this sync the snapshot can
+              # capture .asb files as ZERO LENGTH. The result is a restore point
+              # that looks perfectly healthy, exports almost nothing, and
+              # restores no data at all — silent, total data loss.
+              echo "--------------------------------------------------------"
+              echo "Flushing the page cache to the block device (sync)..."
+              kubectl exec -n "${NS}" "${POD}" -c absctl -- sync
+              sleep 5
+
+              # --- Verify AFTER the sync ----------------------------------
+              # Count files AND assert none is empty. Counting files alone does
+              # not catch the un-synced case, because the (empty) files exist.
+              TOTAL_KIB=0
+              for ASNS in ${NAMESPACES}; do
+                FILES=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                  sh -c "ls -1 /backup/${ASNS}/*.asb 2>/dev/null | wc -l" | tr -d '\r ')
+                if [ -z "${FILES}" ] || [ "${FILES}" -eq 0 ] 2>/dev/null; then
+                  echo "ERROR: no .asb files produced for namespace ${ASNS}."
+                  exit 1
+                fi
+                EMPTY=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                  sh -c "n=0; for f in /backup/${ASNS}/*.asb; do [ -s \"\$f\" ] || n=\$((n+1)); done; echo \$n" \
+                  | tr -d '\r ')
+                if [ "${EMPTY}" != "0" ]; then
+                  echo "ERROR: ${EMPTY} of ${FILES} .asb files for namespace ${ASNS} are EMPTY after sync."
+                  kubectl exec -n "${NS}" "${POD}" -c absctl -- ls -l "/backup/${ASNS}" || true
+                  exit 1
+                fi
+                KIB=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                  sh -c "du -sk /backup/${ASNS} | cut -f1" | tr -d '\r ')
+                echo "OK: namespace ${ASNS} -> ${FILES} file(s), ${KIB} KiB, none empty"
+                TOTAL_KIB=$((TOTAL_KIB + KIB))
+              done
+
+              echo "--------------------------------------------------------"
+              echo "Total dump size on the keeper PVC: ${TOTAL_KIB} KiB"
+              echo "Keeper PVC is synced and ready for the Kasten snapshot."
+
+              kando output keeper     "${KEEPER}"
+              kando output namespace  "${NS}"
+              kando output cluster    "${CR}"
+              kando output namespaces "${NAMESPACES}"
+              kando output dumpKiB    "${TOTAL_KIB}"
+
+  # =========================================================================
+  # restorePosthook — runs AFTER Kasten restores the keeper PVC and metadata.
+  #
+  # absctl restore is ADDITIVE: it writes records from the dump into the target
+  # namespace but never removes records that exist in the target and are absent
+  # from the dump (--replace/--unique/--no-generation all govern per-record
+  # overwrite only; there is no truncate option). Restoring into a namespace that
+  # still holds data would therefore leave stale records behind, including ones
+  # that were deliberately deleted. So: TRUNCATE, then restore.
+  # =========================================================================
+  restorePosthook:
+    phases:
+      - func: KubeTask
+        name: absctlRestore
+        args:
+          namespace: kasten-io
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.4
+          command:
+            - bash
+            - -o
+            - errexit
+            - -o
+            - pipefail
+            - -c
+            - |
+              set -f
+
+              KEEPER="{{ .Object.metadata.name }}"
+              NS="{{ .Object.metadata.namespace }}"
+              POD="${KEEPER}-0"
+
+              echo "Keeper StatefulSet=${KEEPER} pod=${POD} namespace=${NS}"
+
+              # --- Wait for the restored keeper pod -----------------------
+              # It has to be rescheduled and remount the restored PVC, so allow
+              # a generous timeout here.
+              # Poll rather than `kubectl wait`: during a restore the keeper
+              # StatefulSet and its PVC are recreated, so the pod frequently does
+              # not exist yet and `kubectl wait` would fail instantly.
+              echo "Waiting for keeper pod ${POD} to be ready (timeout 10m)..."
+              ELAPSED=0
+              while [ "${ELAPSED}" -lt 600 ]; do
+                READY=$(kubectl get pod "${POD}" -n "${NS}" \
+                  -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true)
+                [ "${READY}" = "true" ] && break
+                sleep 10; ELAPSED=$((ELAPSED + 10))
+              done
+              if [ "${READY}" != "true" ]; then
+                echo "ERROR: restored keeper pod ${POD} did not become ready within 10m."
+                kubectl get pods -n "${NS}" -l app=aerospike-backup-keeper || true
+                exit 1
+              fi
+              echo "Keeper pod ready."
+
+              # --- What is actually IN the restored dump? -----------------
+              # Enumerate from the PVC, not from the live cluster: the dump is
+              # the source of truth for what can be restored.
+              NAMESPACES=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                sh -c 'ls -1 /backup 2>/dev/null | grep -v "^lost+found$" || true' \
+                | tr -d '\r' | tr '\n' ' ')
+              if [ -z "${NAMESPACES// /}" ]; then
+                echo "ERROR: the restored keeper PVC contains no namespace dumps under /backup."
+                kubectl exec -n "${NS}" "${POD}" -c absctl -- ls -la /backup || true
+                exit 1
+              fi
+              echo "Namespaces present in the dump: ${NAMESPACES}"
+
+              # --- PRE-FLIGHT: validate EVERY dump BEFORE touching the DB ---
+              # Ordering matters enormously here. The restore truncates each
+              # namespace before repopulating it, so a dump problem discovered
+              # mid-loop would leave already-truncated namespaces EMPTY —
+              # turning a failed restore into data loss. Validate everything
+              # first and abort before a single record is deleted.
+              #
+              # The failure this catches: a backup taken without a page-cache
+              # sync produces .asb files that exist but are zero length.
+              for ASNS in ${NAMESPACES}; do
+                CNT=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                  sh -c "ls -1 /backup/${ASNS}/*.asb 2>/dev/null | wc -l" | tr -d '\r ')
+                if [ -z "${CNT}" ] || [ "${CNT}" -eq 0 ] 2>/dev/null; then
+                  echo "ERROR: no .asb files for namespace ${ASNS} in this restore point."
+                  exit 1
+                fi
+                EMPTY=$(kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                  sh -c "n=0; for f in /backup/${ASNS}/*.asb; do [ -s \"\$f\" ] || n=\$((n+1)); done; echo \$n" \
+                  | tr -d '\r ')
+                if [ "${EMPTY}" != "0" ]; then
+                  echo "ERROR: ${EMPTY} of ${CNT} .asb file(s) for ${ASNS} are EMPTY."
+                  echo "       This restore point is not usable. The backup was almost"
+                  echo "       certainly taken without a page-cache sync."
+                  echo "       ABORTING BEFORE ANY TRUNCATE — no data has been touched."
+                  kubectl exec -n "${NS}" "${POD}" -c absctl -- ls -l "/backup/${ASNS}" || true
+                  exit 1
+                fi
+                echo "  ${ASNS}: ${CNT} file(s), none empty — OK"
+              done
+              echo "Pre-flight validation passed for all namespaces."
+
+              # --- Wait for the Aerospike cluster -------------------------
+              # The Aerospike device PVCs are excluded from the restore point, so
+              # the cluster must already be running (a live cluster for an
+              # in-place rollback, or a freshly provisioned one for DR).
+              echo "Waiting for a ready Aerospike server pod (timeout 10m)..."
+              SRV_POD=""
+              ELAPSED=0
+              while [ "${ELAPSED}" -lt 600 ]; do
+                SRV_POD=$(kubectl get pods -n "${NS}" -l app=aerospike-cluster \
+                  -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}{"\n"}{end}' \
+                  2>/dev/null | awk '$2=="true"{print $1; exit}')
+                [ -n "${SRV_POD}" ] && break
+                sleep 10; ELAPSED=$((ELAPSED + 10))
+              done
+              if [ -z "${SRV_POD}" ]; then
+                echo "ERROR: no ready Aerospike server pod after 10m. The AerospikeCluster must be"
+                echo "       running before restorePosthook executes — see the DR procedure in README.md."
+                exit 1
+              fi
+              CR=$(kubectl get pod "${SRV_POD}" -n "${NS}" \
+                -o jsonpath='{.metadata.labels.aerospike\.com/cr}')
+              SEED="${CR}.${NS}.svc.cluster.local"
+              echo "Aerospike server pod=${SRV_POD} cluster=${CR} seed=${SEED}:3000"
+
+              # Wait for cluster integrity so truncate reaches every node.
+              ELAPSED=0
+              while [ "${ELAPSED}" -lt 300 ]; do
+                INTEG=$(kubectl exec -n "${NS}" "${SRV_POD}" -c aerospike-server -- \
+                  asinfo -v statistics 2>/dev/null | tr ';' '\n' \
+                  | grep '^cluster_integrity=' | cut -d= -f2 | tr -d '\r' || true)
+                [ "${INTEG}" = "true" ] && break
+                sleep 10; ELAPSED=$((ELAPSED + 10))
+              done
+              CSIZE=$(kubectl exec -n "${NS}" "${SRV_POD}" -c aerospike-server -- \
+                asinfo -v statistics 2>/dev/null | tr ';' '\n' \
+                | grep '^cluster_size=' | cut -d= -f2 | tr -d '\r' || true)
+              echo "cluster_integrity=${INTEG:-unknown} cluster_size=${CSIZE:-unknown}"
+
+              # --- Truncate, then restore, per namespace ------------------
+              for ASNS in ${NAMESPACES}; do
+                echo "--------------------------------------------------------"
+                echo "Namespace ${ASNS}"
+
+                BEFORE=$(kubectl exec -n "${NS}" "${SRV_POD}" -c aerospike-server -- \
+                  asinfo -v "namespace/${ASNS}" 2>/dev/null | tr ';' '\n' \
+                  | grep '^objects=' | cut -d= -f2 | tr -d '\r' || echo "n/a")
+                echo "objects before truncate: ${BEFORE}"
+
+                echo "Truncating ${ASNS} (this is what removes records absent from the dump)..."
+                OUT=$(kubectl exec -n "${NS}" "${SRV_POD}" -c aerospike-server -- \
+                  asinfo -v "truncate-namespace:namespace=${ASNS}" | tr -d '\r')
+                echo "asinfo response: ${OUT}"
+                case "${OUT}" in
+                  ok|OK|ok*) : ;;
+                  *) echo "ERROR: truncate of ${ASNS} failed: ${OUT}"; exit 1 ;;
+                esac
+                sleep 5
+
+                echo "Restoring ${ASNS} from /backup/${ASNS} ..."
+                # --namespace is REQUIRED on restore. The help text describes it
+                # as "used to restore to a different namespace
+                # (source-ns,destination-ns)", which reads as optional, but
+                # omitting it fails with:
+                #   failed to validate config: namespace is required
+                # Passing the bare namespace restores it back to itself.
+                kubectl exec -n "${NS}" "${POD}" -c absctl -- \
+                  absctl restore \
+                    --host "${SEED}" --port 3000 \
+                    --namespace "${ASNS}" \
+                    --directory "/backup/${ASNS}" \
+                    --parallel 4
+
+                AFTER=$(kubectl exec -n "${NS}" "${SRV_POD}" -c aerospike-server -- \
+                  asinfo -v "namespace/${ASNS}" 2>/dev/null | tr ';' '\n' \
+                  | grep '^objects=' | cut -d= -f2 | tr -d '\r' || echo "n/a")
+                echo "OK: ${ASNS} restored — objects after restore: ${AFTER}"
+              done
+
+              echo "--------------------------------------------------------"
+              echo "All namespaces truncated and restored."
+
+  # =========================================================================
+  # delete — nothing external to remove.
+  # =========================================================================
+  delete:
+    inputArtifactNames:
+      - aerospikeBackup
+    phases:
+      - func: KubeTask
+        name: absctlDelete
+        args:
+          namespace: kasten-io
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.4
+          command:
+            - bash
+            - -c
+            - |
+              echo "Kasten deleted the keeper PVC snapshot for this restore point."
+              echo "  keeper     = {{ .ArtifactsIn.aerospikeBackup.KeyValue.keeper }}"
+              echo "  namespace  = {{ .ArtifactsIn.aerospikeBackup.KeyValue.namespace }}"
+              echo "  cluster    = {{ .ArtifactsIn.aerospikeBackup.KeyValue.cluster }}"
+              echo "  namespaces = {{ .ArtifactsIn.aerospikeBackup.KeyValue.namespaces }}"
+              echo "  dump KiB   = {{ .ArtifactsIn.aerospikeBackup.KeyValue.dumpKiB }}"
+              echo ""
+              echo "The .asb dump lives on the keeper PVC and is overwritten by the next"
+              echo "backup. Recoverable history is governed entirely by Kasten snapshot"
+              echo "and export retention. Nothing external to delete."

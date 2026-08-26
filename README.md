@@ -128,6 +128,12 @@ Create a blueprint for MongoDB deployed with the Percona operator.
 
 Create a blueprint for MongoDB deployed with the Percona operator but in sharded mode and using the backup/restore CR.
 
+### Aerospike
+
+Can you build a blueprint for Aerospike?
+How could this approach complement or compare with Aerospike Backup Service and its incremental backup capabilities, considering there will be also other applications to backup on the same cluster such as Kafka?
+For the backup mode let's go incremental, for the restore choose truncation.
+
 ### Galera
 
 Can you create a blueprint using pattern 4 (Database dump or snapshot on a permanent Keeper PVC) for a RHOSO Galera cluster deployed on OpenShift. The issue is that we do not have the
