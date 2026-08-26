@@ -613,8 +613,27 @@ Two Aerospike namespaces (`test` with 100k records plus a `demo` set, and `bar`)
 produced exactly `full, incr, incr, incr, full`, and the fifth run pruned every earlier member. See
 [Export cost — measured](#export-cost--measured).
 
-**Chain replay ordering** — a key was given a different value in each of two incrementals, then
-deleted, with an extra record added that was never backed up:
+**Multiple Aerospike namespaces, each with its own chain** — this is the case worth testing, because
+every namespace maintains an independent chain and is truncated and replayed independently. Both
+namespaces were given a versioned key in each of two incrementals, then corrupted differently:
+
+| Namespace | full | incr 1 | incr 2 |
+|---|---|---|---|
+| `bar` | 1,389 B | 166 B | 166 B |
+| `test` | 28,701,821 B | 168 B | 168 B |
+
+| | Expected | Actual after restore |
+|---|---|---|
+| `test.keyMULTI` | `v2` — newest of `test`'s two incrementals | ✅ `v2` |
+| `bar.keyMULTI` | `w2` — newest of `bar`'s two incrementals | ✅ `w2` |
+| `keyJUNKT` (added to `test`, never backed up) | removed | ✅ absent |
+| `keyJUNKB` (added to `bar`, never backed up) | removed | ✅ absent |
+
+Note `bar`'s incrementals are only 166 bytes while `test`'s full is 28 MB — the chains are resolved
+per namespace, so a small namespace is not dragged along by a large one.
+
+**Chain replay ordering (single namespace)** — a key was given a different value in each of two
+incrementals, then deleted, with an extra record added that was never backed up:
 
 ```bash
 # incremental 1
