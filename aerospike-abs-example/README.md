@@ -52,9 +52,30 @@ The `kasten-tools` tag **must** equal that version — see
 
 ### Why not snapshot the Aerospike volumes
 
-Aerospike stores namespace data on **raw block devices, one PVC per pod**, and each node holds only
-its own subset of the 4096 partitions. A single PVC snapshot *is* crash-consistent within that
-volume, but that is not sufficient:
+The first reason is the decisive one, and it comes from Aerospike's own solution architects.
+
+**On the deployments that most need a backup, there is nothing to snapshot.** Aerospike is chosen for
+latency, and that pushes operators to put the namespace data on **local NVMe attached directly to the
+worker node** rather than on network-attached storage, which adds latency and caps IOPS. Local
+instance storage has no snapshot API and no CSI driver offering `VolumeSnapshot`, so no
+snapshot-based backup is possible at all — not unreliable, simply unavailable. It also means
+**losing the node loses the data**: there is no volume to re-attach elsewhere. For these clusters a
+logical backup is not an optimisation, it is the only protection that exists. The target deployment
+for this blueprint is exactly that shape: ~40 TB across ~30 nodes, all on local NVMe.
+
+> **Do not confuse local NVMe with the NVMe protocol.** On AWS Nitro instances, network-attached EBS
+> volumes also appear as `/dev/nvme*` devices. Those *can* be snapshotted. What cannot be snapshotted
+> is **instance store** — physically attached, ephemeral, gone when the instance goes. Check whether
+> the device is backed by a PVC with a snapshot-capable CSI driver, not what the device is called.
+
+> ⚠️ **Consequence for the keeper.** If the database is on local NVMe, the keeper PVC must **not** be.
+> Put it on network-attached, snapshot-capable storage, or you have recreated the original problem:
+> a dump that Kasten cannot snapshot and that dies with its node.
+
+Even where the data volumes *are* snapshot-capable, as on the EBS-backed test cluster used here,
+snapshotting them is still the wrong choice. Aerospike stores namespace data on **raw block devices,
+one PVC per pod**, and each node holds only its own subset of the 4096 partitions. A single PVC
+snapshot *is* crash-consistent within that volume, but that is not sufficient:
 
 - **No cross-volume/cross-node consistency.** Aerospike's own documentation states snapshots are
   *"consistent within a volume, but may not be consistent between volumes"*. A 3-node namespace
