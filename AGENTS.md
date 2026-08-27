@@ -148,19 +148,25 @@ Most people who read these blueprints do not speak English as a first language, 
 under pressure — usually while something is broken. Idiom and jargon cost them time and can actively
 mislead. Prefer the plain word:
 
+These are the ones that actually caused confusion in review, not an exhaustive list:
+
 | Avoid | Write instead |
 |---|---|
 | the devices *bind* first | the devices are the *bottleneck* |
 | a different *regime* | the *bottleneck is somewhere else* |
-| fails rather than *plateaus* | *fails*, it does not simply *stop getting faster* |
-| *over-subscribe* it | ask for *more than it can serve* |
 | bytes *on the wire* | bytes *sent to object storage* |
 | this *knob* | this *setting* / this *environment variable* |
 | *hot-spots* a node | *concentrates its reads on one node* |
-| will *buy you nothing* | will give *no improvement* |
 | *moving parts* | *Kubernetes objects to deploy* |
 | A is not *dragged along by* B | A does not have to *wait for* B |
 | the blueprint *starts clean* | the blueprint *deletes everything and starts again* |
+| *over-subscribe* it | ask for *more than it can serve* |
+
+**Do not trade idiom for verbosity.** The goal is clarity, not the removal of every figure of
+speech. A short metaphor a technical reader already knows ("fails rather than plateaus") is better
+than a long paraphrase ("causes failures, not just an absence of improvement"). If the plain version
+is longer and no clearer, keep the original and move on. Judge each phrase on whether a reader could
+act on it, not on whether it is idiomatic.
 
 Two rules that matter more than any word list:
 

@@ -392,7 +392,7 @@ counts are identical between the two rows, so coverage stayed exact.
   reaching for backup-shards.**
 - 2.37x rather than 4x because 4 backup-shards approach the *new* ceiling too
   (2,400,010 / 41.3 s ≈ 58,000 records/s against 48,000 provisioned IOPS).
-- **Using too many backup-shards causes failures, not just an absence of improvement.**
+- **Too many backup-shards makes backups fail — it does not simply stop making them faster.**
   `replicas x parallel` is the total scan concurrency
   against a shared database; exceed what it can serve and backup-shards die with
   `ResultCode: TIMEOUT ... MAX_RETRIES_EXCEEDED`. Raise it gradually and watch the blueprint log.
