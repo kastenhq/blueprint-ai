@@ -1,9 +1,13 @@
-# Aerospike — full logical dump on a keeper PVC with `absctl`
+# Aerospike — partitioned, incremental logical backup on keeper PVCs with `absctl`
 
 Kasten blueprint for Aerospike Enterprise clusters managed by the Aerospike Kubernetes Operator
-(AKO). A keeper StatefulSet holds a permanent PVC; `backupPrehook` uses **`absctl`** to write a
-logical dump of every Aerospike namespace onto it — a full, or an incremental against the current
-chain — and Kasten snapshots that PVC.
+(AKO). A keeper StatefulSet holds one permanent PVC **per replica**; `backupPrehook` uses **`absctl`**
+to write a logical dump of every Aerospike namespace onto them — a full, or an incremental against
+the current chain — and Kasten snapshots those PVCs.
+
+Each StatefulSet replica owns a fixed slice of the namespace's 4096 partitions and runs
+**concurrently** with the others. `replicas: 1` is the simple case (one shard covering everything);
+raise it to shard a large database across parallel workers.
 
 > ⚠️ **This directory is an example, not a general-purpose solution.** It encodes assumptions about
 > the AKO version, the CR layout, the storage class, the absence of Aerospike security, the
@@ -11,11 +15,12 @@ chain — and Kasten snapshots that PVC.
 > against. Copy the directory, rename it, adapt it, then re-run Steps 2–6 to validate it. See the
 > ownership disclaimer in the [repository README](../README.md).
 
-> 📉 **Incremental chains are what make this viable.** A full dump every run exports the whole
-> dataset every time — Kopia cannot deduplicate absctl output because it is not byte-stable. With
-> incremental chains the export drops by ~69x. Set the chain length with one env var on the keeper:
-> see [Incremental chains](#incremental-chains) and the measured figures in
-> [Export cost — measured](#export-cost--measured).
+> **Two knobs, both env vars on the keeper, both measured:**
+> - **Incremental chains** cut the *export* cost ~69x — a full dump every run ships the whole
+>   dataset because absctl output is not byte-stable. See [Incremental chains](#incremental-chains).
+> - **Partition shards** (`replicas`) cut the *backup wall-clock* — measured **2.37x at 4 shards**,
+>   but only once the database's storage is not the binding constraint. See
+>   [Partition shards](#partition-shards) and [Measured](#partitioning--measured).
 
 ---
 
@@ -232,6 +237,131 @@ only the changed blocks — a ~6,500x reduction on the wire for an incremental.
 > 26 older completed data-export actions had lost it, so do not plan to read it hours after the run.
 > That is why the results table uses repository growth.
 
+## Partition shards
+
+Aerospike hashes every record into one of exactly **4096 partitions**. `absctl --partition-list
+<start>-<count>` backs up a contiguous range of them, and a set of ranges is a deterministic,
+non-overlapping, complete cover of the keyspace. That is what makes sharding safe: no coordination
+between workers, no duplication, no gaps.
+
+Each StatefulSet replica owns one shard and one PVC:
+
+```
+replicas: 4   ->  shard 0: partitions    0-1024   on backup-...-0
+                  shard 1: partitions 1024-1024   on backup-...-1
+                  shard 2: partitions 2048-1024   on backup-...-2
+                  shard 3: partitions 3072-1024   on backup-...-3
+```
+
+`replicas: 1` is not a special case in the code — it is one shard covering `0-4096`, which absctl
+treats exactly as "no partition filter". `replicas` must divide 4096 evenly (use a power of two);
+the blueprint refuses to run otherwise rather than silently leaving partitions uncovered.
+
+**Range sharding is load-balanced by construction.** Aerospike's partition-to-node assignment is
+pseudo-random, not contiguous, so every shard reads from every node. Measured on the 3-node test
+cluster, each 1024-partition range was served almost evenly:
+
+| node | 0–1023 | 1024–2047 | 2048–3071 | 3072–4095 |
+|---|---|---|---|---|
+| aerocluster-0-0 | 326 | 346 | 336 | 357 |
+| aerocluster-0-1 | 328 | 333 | 354 | 350 |
+| aerocluster-0-2 | 370 | 345 | 334 | 317 |
+
+No shard hot-spots a node.
+
+### Shards run concurrently
+
+`backupPrehook` **launches** the shards one after another but **waits** for all of them together, so
+wall-clock is the slowest shard rather than the sum. Two markers are echoed into the
+`kanister-svc` log so the parallel window can be measured independently of Kasten's snapshot time:
+
+```
+TIMING test full replicas=4 ALL_LAUNCHED epoch_ms=1787835072261
+TIMING test full replicas=4 ALL_FINISHED epoch_ms=1787835113536
+```
+
+Restore replays each chain member across all shards concurrently too — the ranges are disjoint, so
+shards never touch the same record.
+
+### Changing `replicas` forces a full and wipes every volume
+
+The partition range each shard owns is **recorded** in `/backup/<namespace>/.partition` as
+`start count replicas`, and restore **reads** it rather than recomputing it. If the recorded value no
+longer matches the range implied by the current replica count, the blueprint:
+
+1. deletes `/backup/<namespace>` on **every** shard, and
+2. takes a **full** backup under the new layout.
+
+This applies to scaling **up and down** alike, and it is deliberate. A repartition invalidates every
+existing chain member, because they cover ranges that no longer exist; mixing old and new ranges
+would silently produce both gaps and duplicates on restore. Rather than try to reconcile layouts,
+the blueprint starts clean.
+
+> ⚠️ **Consequences to plan for.**
+> - The first backup after any `replicas` change is a **full**, at full cost.
+> - Every previous chain member on the live volumes is **deleted**. Existing Kasten restore points
+>   are untouched — they are immutable snapshots — but they can only be restored into a keeper scaled
+>   back to the replica count they were taken with. The blueprint enforces this: restore aborts if a
+>   shard's recorded `replicas` differs from the current count, and again if the ranges do not tile
+>   0–4095 exactly once.
+> - **Scaling down leaves orphaned PVCs.** A StatefulSet never deletes them. They still hold stale
+>   chains and are still snapshotted by Kasten, wasting space. Delete them by hand:
+>   `kubectl delete pvc backup-aerospike-backup-keeper-<n> -n aerospike-test` for each retired
+>   ordinal.
+
+---
+
+## Partitioning — measured
+
+Same dataset throughout: ~2.4M records of ~2 KB, **5,011,201,867 bytes** of logical dump.
+`ABSCTL_PARALLEL_PER_SHARD=1` in the comparison rows, so each added shard contributes exactly one
+scan thread.
+
+### The result depends entirely on the database's storage
+
+**Rig A — Aerospike data devices on default gp3 (3,000 IOPS each, 9,000 total):**
+
+| replicas | parallel | total scan threads | wall-clock |
+|---|---|---|---|
+| 1 | 1 | 1 | 266.0 s |
+| 1 | 4 | 4 | 266.0 s |
+| 4 | 1 | 4 | 265.0 s |
+| 4 | 2 | 8 | 264.9 s |
+| 4 | 4 | 16 | **failed** — `MAX_RETRIES_EXCEEDED` |
+
+Every configuration lands on ~265 s. One thread is as fast as eight, and sixteen breaks it. The
+reason: **2,382,499 records / 265 s = 8,990 records/s against 3 × 3,000 = 9,000 provisioned IOPS.**
+Each ~2 KB record read costs about one IOP, so a *single* scan thread already saturated the devices.
+Ruled out by measurement: Aerospike CPU (35–44 m of a 2000 m limit, ~2%), the keeper volume
+(181 MB/s via `dd`), and pod co-location (the four shards ran on four different nodes).
+
+**Rig B — same cluster, data devices raised to gp3 16,000 IOPS each (48,000 total):**
+
+| replicas | parallel | records | wall-clock | speedup |
+|---|---|---|---|---|
+| 1 | 1 | 2,400,010 | 97.8 s | — |
+| 4 | 1 | 2,400,010 | **41.3 s** | **2.37x** |
+
+Per-shard absctl durations at 4 shards: 42.1 s, 40.2 s, 40.6 s, 40.9 s — genuinely concurrent. Record
+counts are identical between the two rows, so coverage stayed exact.
+
+### What to take from this
+
+- **Partitioning works, and the gain is real** — but it is bounded by what the Aerospike nodes'
+  storage can deliver. On default gp3 there is nothing to win: the devices bind first.
+- Raising IOPS alone took the single-shard case from 266 s to 97.8 s. **Fix the storage before
+  reaching for shards.**
+- 2.37x rather than 4x because 4 shards approach the *new* ceiling too
+  (2,400,010 / 41.3 s ≈ 58,000 records/s against 48,000 provisioned IOPS).
+- **Over-sharding fails rather than plateaus.** `replicas x parallel` is total scan concurrency
+  against a shared database; exceed what it can serve and shards die with
+  `ResultCode: TIMEOUT ... MAX_RETRIES_EXCEEDED`. Raise it gradually and watch the blueprint log.
+- Nodes backed by **local NVMe** are a different regime entirely — hundreds of thousands of IOPS,
+  where the device will not be the constraint and sharding should scale much further. Size
+  `replicas` there by measuring, using the `ALL_LAUNCHED`/`ALL_FINISHED` markers.
+
+---
+
 ## Prerequisites
 
 - A Kubernetes cluster with Kasten in `kasten-io`.
@@ -319,7 +449,14 @@ kubectl get aerospikecluster -n aerospike-test -w    # wait for PHASE=Completed
 ```
 
 [aerospike-cluster.yaml](aerospike-cluster.yaml) creates a 3-node cluster, namespace `test` at
-`replication-factor 2`, a 1Gi filesystem `workdir` and a 5Gi **raw block** `nsdata` device per pod.
+`replication-factor 2`, a 2Gi filesystem `workdir` and a 10Gi **raw block** `nsdata` device per pod.
+
+> **Storage performance matters more than storage size here.** The `nsdata` devices are what a backup
+> reads from, and on default gp3 (3,000 IOPS) they saturate at a *single* absctl scan thread — see
+> [Partitioning — measured](#partitioning--measured). If you intend to shard the backup across
+> replicas, provision the Aerospike data devices for IOPS first, or sharding will buy you nothing.
+> Note gp3 caps at **500 IOPS/GiB**, so 16,000 IOPS needs a volume of at least 32 GiB; asking for
+> more fails with `Iops to volume size ratio ... too high`.
 
 > **Storage class**: `ebs-sc` is the AWS EBS CSI storage class used in our test environment.
 > Replace it with a storage class that supports CSI snapshots on your cluster
@@ -360,7 +497,12 @@ kubectl rollout status statefulset/aerospike-backup-keeper -n aerospike-test
 - The volumeClaimTemplate is labelled `app=aerospike-backup-keeper`, deliberately **not**
   `app=aerospike-cluster`, which is what the policy excludes.
 - `ABSCTL_INCREMENTALS_BEFORE_FULL` controls the chain length — see
-  [Incremental chains](#incremental-chains). The PVC must hold a whole chain, not one dump.
+  [Incremental chains](#incremental-chains). Each PVC must hold a whole chain, not one dump.
+- `replicas` controls the number of partition shards — see [Partition shards](#partition-shards).
+  Each replica gets its own PVC from the `volumeClaimTemplate`, so a shard needs roughly
+  `dataset / replicas` per chain member. Changing `replicas` **wipes every volume and forces a full**.
+- `ABSCTL_PARALLEL_PER_SHARD` x `replicas` is the total scan concurrency hitting the database.
+  Over-subscribe it and shards **fail**, they do not merely stop speeding up.
 
 ### 2.6 Create test data
 
@@ -437,8 +579,8 @@ kubectl apply -f blueprintbinding.yaml
 
 | Action | Phase | What it does |
 |---|---|---|
-| `backupPrehook` | `absctlBackup` | Waits for the keeper pod. Discovers the Aerospike server pod (`app=aerospike-cluster`), the cluster name (`aerospike.com/cr` label → headless Service = seed host) and the namespace list (`asinfo -v namespaces`). Reads `ABSCTL_INCREMENTALS_BEFORE_FULL` from the running keeper, derives the chain state from the PVC directory names, and takes a **full** or an **incremental** (`--modified-after`) into a new timestamped directory. Then **`sync`**, verifies absctl's reported byte count landed on the device, and **prunes superseded chain members after a full**. Emits `keeper`, `namespace`, `cluster`, `namespaces`, `dumpKiB`, `summary`. |
-| `restorePosthook` | `absctlRestore` | Waits for the restored keeper pod. Enumerates namespaces **from the PVC** and resolves each one's chain (newest full + later incrementals). **Pre-flight-validates every chain before touching the database.** Waits for the Aerospike cluster and `cluster_integrity=true`. Then per namespace: `truncate-namespace`, then replays the chain **oldest first** so the newest version of a record wins. |
+| `backupPrehook` | `absctlBackup` | Reads `replicas` from the StatefulSet and derives each shard's partition range. Discovers the Aerospike server pod (`app=aerospike-cluster`), the cluster name (`aerospike.com/cr` → headless Service = seed host) and the namespace list (`asinfo -v namespaces`). Reads `ABSCTL_INCREMENTALS_BEFORE_FULL`, `ABSCTL_PARALLEL_PER_SHARD` and `ABSCTL_SOCKET_TIMEOUT_MS` from the running keeper. Detects a **replica-count change** via the `.partition` marker and, if found, wipes every shard volume and forces a full. Derives chain state from directory names, then **launches all shards concurrently** and waits for them together, echoing `ALL_LAUNCHED`/`ALL_FINISHED` timing markers. Writes the `.partition` marker, **`sync`**s every shard, verifies absctl's reported bytes landed on each device, and **prunes superseded chain members on every shard after a full**. |
+| `restorePosthook` | `absctlRestore` | Waits for every restored keeper pod. Enumerates namespaces from shard 0 and, for each, **reads the `.partition` markers and validates that the shard ranges tile 0–4095 exactly once** — aborting if the restore point was taken under a different replica count. Resolves the chain (newest full + later incrementals) and rejects zero-length `.asb` files. **All of this happens before any truncate.** Then per namespace: `truncate-namespace`, then replays each chain member **oldest first**, with **all shards in parallel** within a member. |
 | `delete` | `absctlDelete` | Logs the artifact values. Nothing external to delete. |
 
 There is deliberately **no `backupPosthook`**: the keeper PVC is permanent, so there is nothing to
@@ -756,3 +898,8 @@ kubectl run debug -n aerospike-test --image=aerospike/aerospike-tools:13.0.2 --r
 > [after that measurement showed a full dump exports the whole dataset every run] Now work with
 > incremental mode. Put the number of incrementals before a full in an env variable on the keeper —
 > discovering how many incrementals were done should just be reading the filesystem in the PVC.
+>
+> [next round] Now the parallel version with partitions. One blueprint, not two — simple just means
+> a StatefulSet of 1. Keep incremental mode. Test a full with N=1 and N=4, make sure the members run
+> in parallel and not sequentially, and log when all launches finish and when all members finish so
+> the two timestamps can be compared independently of the snapshot time.

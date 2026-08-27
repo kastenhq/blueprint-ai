@@ -109,6 +109,25 @@ spec:
             # export every run.
             - name: ABSCTL_INCREMENTALS_BEFORE_FULL
               value: "3"
+            # ---------------------------------------------------------------
+            # SCAN CONCURRENCY  --  size against the DATABASE, not the keeper
+            # ---------------------------------------------------------------
+            # Total scan threads hitting the Aerospike cluster is
+            #   replicas x ABSCTL_PARALLEL_PER_SHARD
+            # Over-subscribe it and shards do not just stop getting faster, they
+            # FAIL: "ResultCode: TIMEOUT ... MAX_RETRIES_EXCEEDED". Measured on a
+            # 3-node cluster capped at 2 vCPU per pod, 4 shards x 4 threads = 16
+            # killed every shard; 4 shards x 1 thread succeeded.
+            #
+            # Rule of thumb: keep replicas x parallel at or below the total vCPU
+            # the Aerospike pods can actually spare for scanning, then raise it
+            # while watching for TIMEOUT in the blueprint logs.
+            - name: ABSCTL_PARALLEL_PER_SHARD
+              value: "4"
+            # Client socket timeout for record reads. The default 10s is too
+            # tight once several shards compete for the same nodes.
+            - name: ABSCTL_SOCKET_TIMEOUT_MS
+              value: "60000"
           volumeMounts:
             - name: backup
               mountPath: /backup
@@ -137,5 +156,9 @@ spec:
             # Holds exactly ONE full logical dump (--remove-files overwrites in
             # place), so size for the dump, not for a retention chain:
             #   size >= logical dataset size * safety factor
-            # 8Gi here is the smallest sane EBS volume, not a calculated figure.
-            storage: 8Gi
+            # Sizing. Each shard holds a whole CHAIN for its own partition
+            # range: retention.full copies of (dataset / replicas) plus the
+            # incrementals between them. 20Gi here holds a ~5GB single-shard
+            # dump with room for a chain; at replicas=4 each shard needs only a
+            # quarter of that, so the same template is generous.
+            storage: 20Gi

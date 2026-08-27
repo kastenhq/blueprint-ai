@@ -49,7 +49,7 @@ spec:
           persistentVolume:
             storageClass: ebs-sc
             volumeMode: Filesystem
-            size: 1Gi
+            size: 2Gi
       # Namespace data device — RAW BLOCK device, no filesystem.
       # These are the PVCs that must be EXCLUDED from the Kasten policy:
       # see "Why not snapshot the Aerospike device PVCs" in README.md.
@@ -60,7 +60,7 @@ spec:
           persistentVolume:
             storageClass: ebs-sc
             volumeMode: Block
-            size: 5Gi
+            size: 10Gi
       # Feature-key file mounted from the aerospike-secret secret.
       - name: aerospike-config-secret
         source:
