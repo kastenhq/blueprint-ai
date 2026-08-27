@@ -557,12 +557,17 @@ kubectl rollout status statefulset/aerospike-backup-keeper -n aerospike-test
 - `securityContext.fsGroup: 65532` — absctl runs as `uid=65532(abtuser) gid=65532(abtgroup)`.
 - The image ENTRYPOINT is `absctl` itself, so `command` overrides it with a sleep. The image is
   Alpine — **`/bin/sh` only, no bash**, and no `jq`, `curl` or `kando`.
-- The PVC holds exactly **one** dump (`--remove-files` overwrites in place), so size for the dump,
-  not for a retention chain.
+- Each PVC holds a whole **chain** for its own partition range — the newest full plus the
+  incrementals after it — not a single dump. Size it for
+  `(dataset / replicas) x (fulls retained) + incremental headroom`.
 - The volumeClaimTemplate is labelled `app=aerospike-backup-keeper`, deliberately **not**
   `app=aerospike-cluster`, which is what the policy excludes.
 - `ABSCTL_INCREMENTALS_BEFORE_FULL` controls the chain length — see
   [Incremental chains](#incremental-chains). Each PVC must hold a whole chain, not one dump.
+- **The keeper PVC must be on snapshot-capable, network-attached storage** — never on local NVMe,
+  even when the database is. Kasten protects the data by snapshotting *this* volume; if it cannot be
+  snapshotted there is no backup. See
+  [Why not snapshot the Aerospike volumes](#why-not-snapshot-the-aerospike-volumes).
 - `replicas` controls the number of partition backup-shards — see [Partition backup-shards](#backup-shards).
   Each replica gets its own PVC from the `volumeClaimTemplate`, so a backup-shard needs roughly
   `dataset / replicas` per chain member. Changing `replicas` **wipes every volume and forces a full**.
@@ -604,28 +609,38 @@ kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=aerospike-test
 
 ## Step 3 — Validate the workflow without a blueprint
 
+> **Use a scratch directory, not the chain layout.** The blueprint owns
+> `/backup/<namespace>/{full,incr}-<timestamp>/` and enumerates the top level of `/backup` to
+> discover namespaces. A hand-made directory there would be mistaken for a namespace. Write manual
+> tests to a **dot-directory**, which `ls -1` does not list and the blueprint therefore ignores.
+
 ```bash
 SEED=aerocluster.aerospike-test.svc.cluster.local
 POD=aerospike-backup-keeper-0
+SCRATCH=/backup/.manual          # dot-directory: invisible to the blueprint
 
 # Which namespaces exist?
 kubectl exec -n aerospike-test aerocluster-0-0 -c aerospike-server -- asinfo -v namespaces
 
-# Dump one namespace
+# Dump one namespace. --remove-files makes repeated manual runs idempotent; the
+# blueprint does NOT use it, because each chain member is a new directory.
 kubectl exec -n aerospike-test $POD -c absctl -- \
-  absctl backup --host $SEED --port 3000 -n test -d /backup/test --remove-files --parallel 4
+  absctl backup --host $SEED --port 3000 -n test -d $SCRATCH --remove-files --parallel 4
 
 # CRITICAL: flush the page cache before snapshotting (see the warning in Step 4)
 kubectl exec -n aerospike-test $POD -c absctl -- sync
 
 # Inspect
-kubectl exec -n aerospike-test $POD -c absctl -- sh -c 'ls -l /backup/test; du -sk /backup/test'
+kubectl exec -n aerospike-test $POD -c absctl -- sh -c "ls -l $SCRATCH; du -sk $SCRATCH"
 
 # Truncate and restore
 kubectl exec -n aerospike-test aerocluster-0-0 -c aerospike-server -- \
   asinfo -v "truncate-namespace:namespace=test"
 kubectl exec -n aerospike-test $POD -c absctl -- \
-  absctl restore --host $SEED --port 3000 -n test -d /backup/test --parallel 4
+  absctl restore --host $SEED --port 3000 -n test -d $SCRATCH --parallel 4
+
+# Clean up so it cannot be confused with a real chain
+kubectl exec -n aerospike-test $POD -c absctl -- rm -rf $SCRATCH
 ```
 
 Emulate what Kasten does to the keeper PVC with a CSI snapshot, following
