@@ -103,6 +103,10 @@ The choice must balance implementation complexity (backup **and** restore), and 
 
 Deploy the target application in a test namespace. Create a representative minimum dataset that will let you validate a restore (for example, a known set of records, files, or keys that you can verify after recovery). For the speed of the development lifecycle this is very important to create a limited dataset (Under 5Kb). Later once the whole blueprint works you can try performance test by increasing the size of the dataset. But this is out of the scope of this activity.
 
+> The one exception is [Step 6](#step-6--measure-export-deduplication-efficiency), which needs a
+> larger dataset (tens of MB) for the deduplication numbers to be meaningful. Keep Steps 2–5 tiny;
+> grow the dataset only for that measurement.
+
 The way you deploy the workload and how you create test data should be documented in the README.md so that
 user can test it on their own. Also you must describe how to remove the workload and its dependencies.
 
@@ -137,6 +141,46 @@ Write the Blueprint (and BlueprintBinding if needed). Document all deployment pr
 - Any custom dump image (base image, tools added, registry location).
 - Extra operator configuration required (for example, enabling a backup API, creating a backup user).
 - Extra Helm values or manifests that must be applied before the blueprint works.
+
+#### Write the README for readers whose first language is not English
+
+Most people who read these blueprints do not speak English as a first language, and they are reading
+under pressure — usually while something is broken. Idiom and jargon cost them time and can actively
+mislead. Prefer the plain word:
+
+These are the ones that actually caused confusion in review, not an exhaustive list:
+
+| Avoid | Write instead |
+|---|---|
+| the devices *bind* first | the devices are the *bottleneck* |
+| a different *regime* | the *bottleneck is somewhere else* |
+| bytes *on the wire* | bytes *sent to object storage* |
+| this *knob* | this *setting* / this *environment variable* |
+| *hot-spots* a node | *concentrates its reads on one node* |
+| *moving parts* | *Kubernetes objects to deploy* |
+| A is not *dragged along by* B | A does not have to *wait for* B |
+| the blueprint *starts clean* | the blueprint *deletes everything and starts again* |
+| *over-subscribe* it | ask for *more than it can serve* |
+
+**Do not trade idiom for verbosity.** The goal is clarity, not the removal of every figure of
+speech. A short metaphor a technical reader already knows ("fails rather than plateaus") is better
+than a long paraphrase ("causes failures, not just an absence of improvement"). If the plain version
+is longer and no clearer, keep the original and move on. Judge each phrase on whether a reader could
+act on it, not on whether it is idiomatic.
+
+Two rules that matter more than any word list:
+
+1. **Never leave a technical claim as an assertion when the mechanism is short enough to state.**
+   "A single scan thread saturated the devices" tells the reader nothing they can act on. "Aerospike
+   keeps its index in RAM but record data on the device, so a scan issues roughly one device read per
+   record; a gp3 volume serves a fixed number of operations per second and queues the rest" lets them
+   check it against their own hardware.
+2. **Distinguish different failure mechanisms explicitly**, even when they look like degrees of the
+   same problem. A reader who thinks a timeout means "I overloaded the database" will buy bigger
+   nodes, when the fix was a longer client timeout.
+
+Keep sentences short. Put numbers in tables. Say what a term means the first time it appears if the
+project invented it.
 
 **Always include a versions table** in the `README.md` documenting the exact versions used when the blueprint was developed and tested. Blueprint behavior is often version-sensitive (operator APIs change, database backup semantics differ across releases). The table must cover at minimum:
 
@@ -258,6 +302,102 @@ Iterate until success without coming back to step 1 unless you discover step 1 c
 
 **If Step 3 succeeds but Step 5 fails, do not change the pattern.** Step 5 is purely the test of the automation of Step 3 — if the blueprint does not behave as the validated workflow did, there is a blueprint or Kasten integration issue, not a strategy issue. Stop, explain the discrepancy to the user, and work through it together before considering any change of pattern.
 
+### Step 6 — Measure Export Deduplication Efficiency
+
+Every dump-based pattern (3–9) makes an implicit bet about **incrementality**. A blueprint that
+rewrites its dump on every run looks wasteful on paper, but Kasten's export to object storage is
+content-addressed and deduplicated by Kopia, so a rewritten dump whose *content* barely changed may
+still export almost nothing. Conversely, a dump that appends timestamped files looks incremental but
+may dedupe poorly if the tool recompresses or reorders records.
+
+**Do not assert an incrementality claim in a README without measuring it.** "Full dumps are
+expensive" and "append-only layouts are incremental" are both plausible and both frequently wrong.
+Measure, then write the number down.
+
+#### Procedure
+
+The Kopia repository for a namespace lives on the export target under a deterministic prefix:
+
+```
+k10/<cluster-uid>/migration/repo/<namespace-uid>/
+```
+
+where `<cluster-uid>` is the UID of the **`default` namespace** and `<namespace-uid>` is the UID of
+the protected application namespace:
+
+```bash
+CLUSTER_UID=$(kubectl get ns default -o jsonpath='{.metadata.uid}')
+NS_UID=$(kubectl get ns <APP_NAMESPACE> -o jsonpath='{.metadata.uid}')
+PREFIX="k10/${CLUSTER_UID}/migration/repo/${NS_UID}"
+```
+
+Then:
+
+1. **Enable export** on the policy (an `exportAction` with a Location profile). Deduplication only
+   happens on export — a snapshot-only policy exports nothing and cannot be measured.
+2. Run backup **and** export, wait for both to complete.
+3. **Measure** the repository size:
+   ```bash
+   aws s3 ls "s3://<BUCKET>/${PREFIX}/" --recursive --summarize | tail -3
+   ```
+   > **Two figures, and they measure different things. Capture both.**
+   >
+   > 1. `ExportAction.status.progressDetails.transferredBytes` — what Kasten actually put on the
+   >    wire. This is the number to quote for export cost. Read it from the **data** export action,
+   >    which carries the label `k10.kasten.io/exportType: portableAppData`. There is usually also a
+   >    *metadata* export action (`k10.kasten.io/isMetadataExport: "true"`, no `exportType` label)
+   >    which has no `progressDetails` at all — do not mistake it for the data export:
+   >    ```bash
+   >    kubectl get exportaction -n <APP_NAMESPACE> \
+   >      -l k10.kasten.io/exportType=portableAppData \
+   >      --sort-by=.metadata.creationTimestamp -o yaml | sed -n '/progressDetails/,+8p'
+   >    ```
+   >    **Capture it promptly.** `progressDetails` is not durably retained: observed on Kasten
+   >    `9.0.4`, completed data-export actions still reported it when read soon after the run, but
+   >    every one of 26 older completed actions had lost it. Do not plan to read it hours later.
+   >
+   > 2. **Object-store repository growth** — durable and re-checkable at any time, so it is the right
+   >    figure for a reproducible README table. It runs larger than `transferredBytes` because it
+   >    includes Kopia index and metadata blobs. Sum **both** prefixes Kasten writes:
+   >    `migration/repo/<namespace-uid>/` holds the bulk (the exported volume data) and
+   >    `migration/<policy-name>/kopia/` is a smaller companion repository.
+4. **Introduce a representative change** in the database — a realistic delta, not a rewrite. For
+   example modify or add ~1% of records.
+   > ⚠️ **Make sure the generated data is actually random.** Bulk-load tools often write an identical
+   > value to every record by default (`asbench` needs `--random`, for instance). Identical records
+   > deduplicate at absurd ratios and produce a meaningless measurement that looks like a triumph.
+5. Run backup **and** export again, wait for completion.
+6. **Measure again.**
+
+The growth between the two measurements, compared with the logical dump size, is the deduplication
+efficiency of the design. Report all three numbers in the blueprint `README.md`:
+
+| Measurement | Value |
+|---|---|
+| Logical dump size on the keeper PVC | for example, `21 MiB` |
+| Kopia repo after first export | for example, `9.4 MiB` |
+| Kopia repo after 1% change + re-export | for example, `9.7 MiB` |
+| **Export growth for the second backup** | for example, `0.3 MiB (3%)` |
+
+A small growth means the design is effectively incremental *even if the dump itself is a full
+rewrite* — which is a legitimate and often decisive argument for choosing the simpler full-dump
+blueprint over a chained-incremental one.
+
+#### Dataset size for this step only
+
+Steps 2–5 deliberately use a tiny dataset (under 5KB) for a fast development loop. **That is useless
+for a dedup measurement** — Kopia's metadata dominates and the ratio is meaningless. For Step 6 only,
+load a dataset large enough for the numbers to mean something (tens of MB is usually enough) using
+the database's own bulk-load tool where one exists (for example `asbench` for Aerospike, `pgbench`
+for Postgres, `mongoimport` for MongoDB). Document how you generated it so the measurement is
+reproducible, then you may shrink the dataset again.
+
+#### If no S3 export target exists
+
+Deploy an in-cluster MinIO instance and create **one bucket per blueprint under development**, so
+measurements from different blueprints never share a repository and cannot pollute each other's
+numbers. See the MinIO deployment example referenced in Step 3, then register it as a Kasten
+Location profile pointing at that blueprint's bucket.
 
 ---
 
@@ -345,9 +485,28 @@ https://docs.kasten.io/latest/api/actions#api-cancel-action.
 ### Triggering RestoreAction
 
 `RestorePoint` objects live in the **application namespace**. `RestoreAction` must also be created
-in the application namespace. You do **not** need to specify a `profile` in the `RestoreAction` —
-Kasten extracts the location profile required for Kanister blueprint phases (restorePosthook and so on)
-from the `RestorePointContent` automatically.
+in the application namespace. In principle Kasten extracts the location profile required for
+Kanister blueprint phases (restorePosthook and so on) from the `RestorePointContent` automatically.
+
+> ⚠️ **On Kasten 8.x, set `spec.profile` explicitly. Fixed in 9.0.** Extraction from the
+> `RestorePointContent` is unreliable on 8.x: the restore falls back to looking for a default
+> profile literally named `kanister-profile`, and when that does not exist the whole action fails
+> **after the volumes have already been restored**, with the blueprint's `restorePosthook` never
+> running:
+>
+> ```
+> profiles.config.kio.kasten.io "kanister-profile" not found
+> Could not fetch a location profile. Location profile must be specified in action or policy parameters
+> Error running Kanister restore post-hook action
+> ```
+>
+> Observed on Kasten `8.5.13`; **verified fixed on `9.0.4`**, where a restore from a remote
+> (exported) restore point with no `profile` field completes and runs `restorePosthook` normally.
+> On 8.x the workaround is to name the profile in the `RestoreAction` (`spec.profile` below).
+>
+> Note the failure mode is nasty for truncate-then-restore blueprints: the volume restore succeeds
+> and reports progress 100%, so it looks like a late failure when in fact the data-side hook never
+> ran at all.
 
 ```bash
 # List available restore points for an app
@@ -367,8 +526,20 @@ spec:
     name: <RESTORE_POINT_NAME>
     namespace: <APP_NAMESPACE>
   targetNamespace: <APP_NAMESPACE>
+  # On Kasten 8.x only, add: profile: {name: <LOCATION_PROFILE>, namespace: kasten-io}
 EOF
 ```
+
+> **Reading a failed action's error.** Do not use `jq 'del(.error)'` or narrow `jsonpath` guesses —
+> the useful cause is nested several levels deep inside `status.error.cause` as escaped JSON. Read
+> the whole field first:
+>
+> ```bash
+> kubectl get restoreaction <name> -n <APP_NAMESPACE> -o jsonpath='{.status.error}'
+> ```
+>
+> This is far more reliable than hunting through `executor` logs, which rotate quickly, and than
+> trying to catch the short-lived `kanister-job-*` pod's logs before it disappears.
 
 > **Policy requirement**: for the backup policy to record a Kanister-compatible profile in the
 > `RestorePointContent` (which the restore then extracts automatically), the

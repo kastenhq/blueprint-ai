@@ -29,7 +29,7 @@
 # Always pass --build-arg explicitly so the tag matches the target cluster; the ARG
 # defaults below only track the most recently tested version. See README.md.
 
-ARG KASTEN_VERSION=8.5.13
+ARG KASTEN_VERSION=9.0.4
 FROM gcr.io/kasten-images/kanister-tools:${KASTEN_VERSION}
 
 ARG KUBECTL_VERSION=1.32.0
