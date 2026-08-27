@@ -15,7 +15,7 @@ raise it to backup-shard a large database across parallel workers.
 > against. Copy the directory, rename it, adapt it, then re-run Steps 2–6 to validate it. See the
 > ownership disclaimer in the [repository README](../README.md).
 
-> **Two knobs, both env vars on the keeper, both measured:**
+> **Two settings, both environment variables on the keeper, both measured:**
 > - **Incremental chains** cut the *export* cost ~69x — a full dump every run ships the whole
 >   dataset because absctl output is not byte-stable. See [Incremental chains](#incremental-chains).
 > - **Partition backup-shards** (`replicas`) cut the *backup wall-clock* — measured **2.37x at 4 backup-shards**,
@@ -85,7 +85,7 @@ and retention. Running both means two schedulers and two retention regimes over 
 | Chain length control | two cron expressions | one env var on the keeper |
 | Deleted records resurrected | yes, bounded by its full interval | same risk, bounded by `ABSCTL_INCREMENTALS_BEFORE_FULL` (`0` removes it) |
 | Namespace list | hand-maintained, can silently miss one | discovered from the live cluster |
-| Moving parts | Deployment + ConfigMap + Service + PVC | StatefulSet + PVC |
+| Kubernetes objects to deploy | Deployment + ConfigMap + Service + PVC | StatefulSet + PVC |
 
 What genuinely improves:
 
@@ -122,7 +122,7 @@ it*. Counting the incrementals decides whether the next run is another increment
 and the newest directory's stamp becomes the next `--modified-after`. Reading the volume is the whole
 of the state machine.
 
-### The one knob
+### The setting that controls it
 
 ```yaml
 # abs-keeper.yaml, on the keeper container
@@ -210,7 +210,7 @@ by orchestration — snapshot creation, pod scheduling, export setup — and abs
 milliseconds. Expect the incremental gain to become visible in the action duration only once the
 dataset is large enough for the scan to dominate.
 
-### What Kasten actually put on the wire
+### How many bytes Kasten actually sent to object storage
 
 The table above uses object-store repository growth because it is durable and re-checkable. Kasten's
 own accounting is smaller and even more favourable, because the export is *block*-incremental on top
@@ -222,7 +222,7 @@ of the append-only layout — taken from the `portableAppData` ExportAction stat
 | incremental | **168** | **4,400** |
 
 `processedBytes: 29000168` alongside `readBytes: 168` shows it walking the whole volume but reading
-only the changed blocks — a ~6,500x reduction on the wire for an incremental.
+only the changed blocks. For an incremental that is ~6,500x fewer bytes sent to object storage.
 
 > **Reading these figures yourself.** Use the **data** export action, labelled
 > `k10.kasten.io/exportType: portableAppData`. The *metadata* export action
@@ -296,7 +296,7 @@ cluster, each 1024-partition range was served almost evenly:
 | aerocluster-0-1 | 328 | 333 | 354 | 350 |
 | aerocluster-0-2 | 370 | 345 | 334 | 317 |
 
-No backup-shard hot-spots a node.
+No backup-shard concentrates its reads on one node.
 
 ### Backup-shards run concurrently
 
@@ -324,7 +324,7 @@ longer matches the range implied by the current replica count, the blueprint:
 This applies to scaling **up and down** alike, and it is deliberate. A repartition invalidates every
 existing chain member, because they cover ranges that no longer exist; mixing old and new ranges
 would silently produce both gaps and duplicates on restore. Rather than try to reconcile layouts,
-the blueprint starts clean.
+the blueprint deletes everything and starts again from a full backup.
 
 > ⚠️ **Consequences to plan for.**
 > - The first backup after any `replicas` change is a **full**, at full cost.
@@ -392,7 +392,8 @@ counts are identical between the two rows, so coverage stayed exact.
   reaching for backup-shards.**
 - 2.37x rather than 4x because 4 backup-shards approach the *new* ceiling too
   (2,400,010 / 41.3 s ≈ 58,000 records/s against 48,000 provisioned IOPS).
-- **Over-sharding fails rather than plateaus.** `replicas x parallel` is total scan concurrency
+- **Using too many backup-shards causes failures, not just an absence of improvement.**
+  `replicas x parallel` is the total scan concurrency
   against a shared database; exceed what it can serve and backup-shards die with
   `ResultCode: TIMEOUT ... MAX_RETRIES_EXCEEDED`. Raise it gradually and watch the blueprint log.
 - Nodes backed by **local NVMe** should move the bottleneck somewhere else entirely. Local NVMe
@@ -496,7 +497,8 @@ kubectl get aerospikecluster -n aerospike-test -w    # wait for PHASE=Completed
 > **Storage performance matters more than storage size here.** The `nsdata` devices are what a backup
 > reads from, and on default gp3 (3,000 IOPS) they saturate at a *single* absctl scan thread — see
 > [Partitioning — measured](#partitioning--measured). If you intend to backup-shard the backup across
-> replicas, provision the Aerospike data devices for IOPS first, or backup-sharding will buy you nothing.
+> replicas, provision the Aerospike data devices for IOPS first, or backup-sharding will give you no
+> improvement at all.
 > Note gp3 caps at **500 IOPS/GiB**, so 16,000 IOPS needs a volume of at least 32 GiB; asking for
 > more fails with `Iops to volume size ratio ... too high`.
 
@@ -544,7 +546,8 @@ kubectl rollout status statefulset/aerospike-backup-keeper -n aerospike-test
   Each replica gets its own PVC from the `volumeClaimTemplate`, so a backup-shard needs roughly
   `dataset / replicas` per chain member. Changing `replicas` **wipes every volume and forces a full**.
 - `ABSCTL_PARALLEL_PER_BACKUP_SHARD` x `replicas` is the total scan concurrency hitting the database.
-  Over-subscribe it and backup-shards **fail**, they do not merely stop speeding up.
+  If you ask for more than the database can serve, backup-shards **fail** — they do not simply stop
+  getting faster.
 
 ### 2.6 Create test data
 
@@ -814,7 +817,7 @@ namespaces were given a versioned key in each of two incrementals, then corrupte
 | `keyJUNKB` (added to `bar`, never backed up) | removed | ✅ absent |
 
 Note `bar`'s incrementals are only 166 bytes while `test`'s full is 28 MB — the chains are resolved
-per namespace, so a small namespace is not dragged along by a large one.
+per namespace, so a small namespace does not have to wait for a large one.
 
 **Chain replay ordering (single namespace)** — a key was given a different value in each of two
 incrementals, then deleted, with an extra record added that was never backed up:

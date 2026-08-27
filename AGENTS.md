@@ -142,6 +142,40 @@ Write the Blueprint (and BlueprintBinding if needed). Document all deployment pr
 - Extra operator configuration required (for example, enabling a backup API, creating a backup user).
 - Extra Helm values or manifests that must be applied before the blueprint works.
 
+#### Write the README for readers whose first language is not English
+
+Most people who read these blueprints do not speak English as a first language, and they are reading
+under pressure — usually while something is broken. Idiom and jargon cost them time and can actively
+mislead. Prefer the plain word:
+
+| Avoid | Write instead |
+|---|---|
+| the devices *bind* first | the devices are the *bottleneck* |
+| a different *regime* | the *bottleneck is somewhere else* |
+| fails rather than *plateaus* | *fails*, it does not simply *stop getting faster* |
+| *over-subscribe* it | ask for *more than it can serve* |
+| bytes *on the wire* | bytes *sent to object storage* |
+| this *knob* | this *setting* / this *environment variable* |
+| *hot-spots* a node | *concentrates its reads on one node* |
+| will *buy you nothing* | will give *no improvement* |
+| *moving parts* | *Kubernetes objects to deploy* |
+| A is not *dragged along by* B | A does not have to *wait for* B |
+| the blueprint *starts clean* | the blueprint *deletes everything and starts again* |
+
+Two rules that matter more than any word list:
+
+1. **Never leave a technical claim as an assertion when the mechanism is short enough to state.**
+   "A single scan thread saturated the devices" tells the reader nothing they can act on. "Aerospike
+   keeps its index in RAM but record data on the device, so a scan issues roughly one device read per
+   record; a gp3 volume serves a fixed number of operations per second and queues the rest" lets them
+   check it against their own hardware.
+2. **Distinguish different failure mechanisms explicitly**, even when they look like degrees of the
+   same problem. A reader who thinks a timeout means "I overloaded the database" will buy bigger
+   nodes, when the fix was a longer client timeout.
+
+Keep sentences short. Put numbers in tables. Say what a term means the first time it appears if the
+project invented it.
+
 **Always include a versions table** in the `README.md` documenting the exact versions used when the blueprint was developed and tested. Blueprint behavior is often version-sensitive (operator APIs change, database backup semantics differ across releases). The table must cover at minimum:
 
 | Component | Version |
