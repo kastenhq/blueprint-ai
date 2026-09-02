@@ -142,6 +142,52 @@ Write the Blueprint (and BlueprintBinding if needed). Document all deployment pr
 - Extra operator configuration required (for example, enabling a backup API, creating a backup user).
 - Extra Helm values or manifests that must be applied before the blueprint works.
 
+#### Always sync the filesystem before Kasten snapshots the PVC
+
+**Any blueprint that writes to a PVC and then lets Kasten snapshot it must flush that filesystem
+as the very last thing `backupPrehook` does.** This applies to every dump, snapshot and keeper
+pattern (3–9) — anywhere a pod has just written data that Kasten is about to capture.
+
+**Why:** a CSI snapshot captures the **block device**, and Kasten does not `fsfreeze` the
+filesystem. Data the writer has acknowledged but the kernel has not yet flushed sits in the page
+cache, which the snapshot does not see. The result is not a clean failure: the file exists in the
+snapshot with the right name and **zero bytes**. The dump or repository therefore looks complete,
+and the problem is only discovered at restore time.
+
+```yaml
+# KubeTask running in kasten-io — exec into the pod that did the writing
+- func: KubeTask
+  args:
+    namespace: kasten-io
+    command:
+      - bash
+      - -c
+      - |
+        # ... produce the dump / trigger the vendor backup ...
+        kubectl exec -n "${NS}" "${WRITER_POD}" -- sync
+```
+
+With `KubeExec` the phase already runs inside the pod, so a bare `sync` is enough. See
+[cockroachdb-example](cockroachdb-example/), [elasticsearch-eck-minio-example](elasticsearch-eck-minio-example/),
+[couchbase-operator-example](couchbase-operator-example/) and [rhoso-galera-example](rhoso-galera-example/)
+for the established shape.
+
+Three rules that make the difference between a sync that works and one that only looks like it:
+
+1. **It must be last.** Anything the blueprint does after the sync can dirty the cache again.
+2. **Do not trust the application's own durability claims.** MinIO, for example, documents that it
+   writes object data with `O_DIRECT` followed by `fdatasync`, which reads like a guarantee that a
+   sync is unnecessary — yet 0-byte objects were still observed in snapshots without one. Whatever
+   the upstream design says, flush it yourself.
+3. **Where it is cheap, assert the flush took effect** rather than assuming it, by checking the
+   written bytes are actually visible. [aerospike-abs-example](aerospike-abs-example/) does this and
+   aborts if a shard reports written bytes while its device still holds none.
+
+Related: when a blueprint waits for data to reach a remote store, **verify at the destination, not
+at the source**. A source-side statistic saying "sent" is not evidence the bytes arrived, and such
+counters are often not monotonic — see the `pg_stat_archiver` note in
+[tanzu-postgres-example](tanzu-postgres-example/README.md).
+
 #### Write the README for readers whose first language is not English
 
 Most people who read these blueprints do not speak English as a first language, and they are reading
