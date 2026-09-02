@@ -245,6 +245,57 @@ selection is involved there. But `pg_switch_wal()` must run on the primary; a st
 with `recovery is in progress`. The README also needs the primary for creating and verifying test
 data.
 
+### What a stanza is
+
+A **stanza is pgBackRest vocabulary**, not Kubernetes or Tanzu vocabulary. In pgBackRest a stanza
+is the unit of configuration for **one PostgreSQL cluster**: where its data directory is, how to
+reach it, and which repository its backups go to. The stanza name is also the **directory prefix
+inside the repository** under which that cluster's base backups and WAL archive are stored, which
+is what makes one bucket able to hold several unrelated clusters without collision. Other tools
+name the same idea differently — barman calls it a *server*.
+
+`pgbackrest stanza-create` initialises one, and that is exactly the command that failed when MinIO
+was serving plaintext (see [The keeper must serve HTTPS](#the-keeper-must-serve-https)).
+
+The operator generates the name as `<namespace>-<instance-name>-<uuid>`, for example:
+
+```
+tanzu-postgres-pg-ha-dc7f93e4-b713-4835-a16a-24488fac55e3
+```
+
+It is exposed in three places, and injected into the instance pods as `$BACKUP_STANZA_NAME`:
+
+```bash
+kubectl get postgres pg-ha -n tanzu-postgres -o jsonpath='{.status.stanzaName}'
+kubectl get postgresbackup <name> -n tanzu-postgres -o jsonpath='{.status.stanzaName}'
+kubectl exec -n tanzu-postgres "$PRIMARY" -c pg-container -- printenv BACKUP_STANZA_NAME
+```
+
+**The `uuid` is the part that matters operationally.** It is per-instance-lifetime, not per-name, so
+an instance that is deleted and recreated under the *same* name gets a *new* stanza. Two
+consequences, both observed here:
+
+- A recovered instance can archive into the same bucket as the stanza it was recovered from,
+  without collision. This is simpler than barman-based setups, which need a separate bucket for the
+  recovered cluster.
+- **The repository accumulates one stanza per instance lifetime**, and nothing prunes them. After
+  three lifetimes of an instance always called `pg-ha`, the bucket held three, under both
+  `backup/` and `archive/`:
+
+  ```
+  tanzu-pg-backup/pg-ha/backup/tanzu-postgres-pg-ha-193b12a4-.../
+  tanzu-pg-backup/pg-ha/backup/tanzu-postgres-pg-ha-dc7f93e4-.../
+  tanzu-pg-backup/pg-ha/backup/tanzu-postgres-pg-ha-30ae2de3-.../
+  ```
+
+  `retentionPolicy` prunes backups *within* a stanza; it does not remove a stanza that no longer
+  has a live instance. Delete obsolete ones deliberately once you are sure no restore point still
+  needs them — and note that a Kasten restore point captures whatever stanzas were present when
+  its snapshot was taken.
+
+Because a restore needs the stanza of the instance you are recovering *from*, and that instance is
+deleted by then, the blueprint records `stanzaName` as a restore-point artifact.
+
 ### Output artifacts
 
 Recorded on the restore point by `backupPrehook`. Only the first two are functionally required.
@@ -667,23 +718,37 @@ kubectl get crd postgresbackups.sql.tanzu.vmware.com -o yaml \
 print(list(d['spec']['versions'][0]['schema']['openAPIV3Schema']['properties']['spec']['properties']))"
 ```
 
-### Never use a Go template inside a blueprint script
+### Escape Go templates inside a blueprint script
 
 Not a Broadcom issue, but it cost a failed run here and will bite anyone adapting this blueprint.
-Kanister renders the whole script as a **Go template** before executing it, so any
+Kanister renders the whole script as a **Go template** before executing it, so a
 double-curly-brace expression is consumed by Kanister and never reaches the command you wrote it
-for. Reaching for `kubectl -o go-template=...` fails with:
+for. Reaching for `kubectl -o go-template=...` unescaped fails with:
 
 ```
 template: config:181:40: executing "config" at <.spec.selector.matchLabels>:
 can't evaluate field spec in type param.TemplateParams
 ```
 
-Kanister tried to resolve `.spec.selector.matchLabels` against its own parameters. The only
-double-brace expressions that belong in a script are Kanister's own (`.Object.*`,
-`.ArtifactsIn.*`, `.Phases.*`). For anything else use `-o jsonpath=` or `-o json | jq`, which is
-what this blueprint does — `jq`'s interpolation is `\(...)` and is safe. The trap extends to
-**comments**: a comment containing a double-brace expression is rendered too.
+Kanister tried to resolve `.spec.selector.matchLabels` against its own parameters.
+
+**It can be escaped.** Go's escape is a string literal inside an action, so `{{ "{{" }}` emits a
+literal `{{`. Both quoting styles work, verified through a Kasten RunAction on the cluster:
+
+| Written in the blueprint | Reaches `kubectl` as |
+|---|---|
+| `{{ "{{" }}range $k,$v := .spec.selector.matchLabels{{ "}}" }}` | `{{range $k,$v := .spec.selector.matchLabels}}` |
+| `` {{ `{{` }}range $k,$v := .spec.selector.matchLabels{{ `}}` }} `` | same |
+
+Nesting does **not** work — `{{ {{ }}...{{ }} }}` is a parse error, `unexpected "{" in command`.
+
+This blueprint still uses `-o json | jq` instead, because the escaped form is close to unreadable
+once every brace is doubled, and `jq` needs no escaping at all: its interpolation syntax is
+`\(...)`. Reach for the escape when only a Go template will do, and prefer `-o jsonpath=` or
+`-o json | jq` otherwise.
+
+The trap extends to **comments**: a comment containing an unescaped double-brace expression is
+rendered too, so a comment written to warn about this problem can cause it.
 
 ### Set both storage classes explicitly
 
