@@ -128,6 +128,12 @@ Create a blueprint for MongoDB deployed with the Percona operator.
 
 Create a blueprint for MongoDB deployed with the Percona operator but in sharded mode and using the backup/restore CR.
 
+### VMware Tanzu for Postgres on Kubernetes
+
+Can you create a blueprint for the VMware Tanzu for Postgres on Kubernetes described here
+https://techdocs.broadcom.com/us/en/vmware-tanzu/data-solutions/tanzu-for-postgres-on-kubernetes/4-5/tnz-postgres-k8s/index.html
+you should read carefully the backup-restore documentation that belongs to this documentation. You will privilegiate for the deployment example a high availability instance.
+
 ### Aerospike
 
 Can you build a blueprint for Aerospike?

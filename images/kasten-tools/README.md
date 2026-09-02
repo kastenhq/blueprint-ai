@@ -42,7 +42,7 @@ working.
 | `8.5.7` | elasticsearch-eck-minio |
 | `8.5.9` | cnpg-barman-cloud, cockroachdb |
 | `8.5.13` | grafana-mimir |
-| `9.0.4` | aerospike-abs |
+| `9.0.4` | aerospike-abs, tanzu-postgres |
 
 `ARG KASTEN_VERSION` in the `Dockerfile` is the **most recently tested** version. It is always
 built even if no blueprint references it, and it is the only version also tagged `latest`. There is
