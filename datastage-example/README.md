@@ -153,10 +153,12 @@ helm ls -n kasten-io
 ```
 
 > **Tool image note.** The blueprint references `kasten-tools:9.0.5`, matching the Kasten version
-> above; CI publishes a tag for every referenced version on merge. The hooks themselves were
-> executed against the already-published `9.0.4` tag, because `9.0.5` did not exist at development
-> time. The image only supplies `kubectl`, `jq` and `bash`, so the difference does not affect what
-> was validated — but it is a difference, and you should know about it.
+> above, and the hooks were validated on that exact tag. CI publishes a tag for every referenced
+> version, but only on a push to the default branch — the workflow sets
+> `push: ${{ github.event_name != 'pull_request' }}` — so while a blueprint is still in review its
+> tag builds green **without being pushed**, and a `backupPrehook` referencing it fails with
+> `ImagePullBackOff`. If you are developing a blueprint against a version CI has not published yet,
+> run it against the newest published tag until yours merges.
 
 ---
 
@@ -264,6 +266,23 @@ Two further measurements worth knowing:
 > project's data files. A Data Set write deletes the existing data files before rewriting them, so
 > running the cloned job destroyed the source project's Data Set: `view-dataset` on the
 > **original** then failed with `Sample data could not be read from dataset …`.
+>
+> **Why byte-identical, mechanically.** The `data_intg_data_set` asset does not merely *describe*
+> the Data Set — it **carries the descriptor as an attachment**. Three attachments, read off the
+> live asset:
+>
+> ```
+> data_intg_data_set_entity   application/json           (metadata)
+> customers.ds                application/octet-stream   <- the descriptor BYTES
+> customers.ds.schema         application/octet-stream
+> object_key: data_intg_data_set/ds-storage/PXRuntime/Projects/<pid>/customers.ds/customers.ds
+> ```
+>
+> Downloading that attachment out of project storage gives **3431 bytes, `md5
+> 5588c9325fecc8bf76bb097790c61e86`** — identical to the descriptor on `/ds-storage`. So an export
+> moves the descriptor verbatim and an import writes those same bytes back under the *new* project
+> id, with the *original* absolute `/px-storage` paths still inside them. That is the whole
+> mechanism: the clone does not compute new paths, it inherits the source's.
 >
 > Project assets are project-scoped; the engine storage they address is shared by every project on
 > that runtime instance. On a different cluster the data files are simply absent until a job
@@ -569,7 +588,45 @@ Without them the action fails on `Failed to delete PVC`.
 > the action fails **after** the volumes are restored, with `restorePosthook` never running. Fixed
 > in 9.0 — this blueprint was tested on 9.0.5 with no `profile` field.
 
-### Step 3 — recompile and smoke-test
+### Step 3 — verify the data actually came back
+
+**Do this before anything else, and do it with `view-dataset`.** A Data Set restores as three
+independent things, and only a live read exercises all of them.
+
+```bash
+export CPDCTL_ENABLE_DSJOB=true
+./bin/cpdctl dsjob view-dataset --project-id <PID> --name <dataset>     # the honest check
+```
+
+> ⚠️ **`describe-dataset` will lie to you.** It reads its figures out of the descriptor's
+> statistics section, and nothing re-validates them against the filesystem. Measured: with the data
+> files on `/px-storage` **deleted**, it still reported
+>
+> ```
+> DataSet Size:      140
+> DataSet Row Count: 5
+> ```
+>
+> while `view-dataset` failed with `Sample data could not be read from dataset …`. Same for the UI:
+> **View schema** succeeds on the descriptor alone, **View data** does not. So a restore that shows
+> the right row count has proved nothing. This also gives a clean triage rule — *View schema works,
+> View data fails* means `/ds-storage` came back and `/px-storage` did not.
+
+**Check the data-file ids, not the row values.** If the flow is deterministic — the fixture's Row
+Generator is — a re-run produces **identical rows under new file ids**. So matching rows do not
+distinguish restored data from freshly regenerated data; matching ids do:
+
+```bash
+POD=$(kubectl get pod -n cpd -l app.kubernetes.io/component=px-runtime -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n cpd "$POD" -- ls /px-storage/pds_files/node2 /px-storage/pds_files/node3
+# e.g. customers.ds.1000830000.10.128.5.251.0000.0000.0000.506fe.6aa720f5.0000.fec37648
+#                                                            ^^^^^^^^^^^^^^ unique per WRITE
+```
+
+The id changes on every write, so seeing the pre-backup id return is what proves the restore
+replaced the bytes rather than the engine rebuilding them.
+
+### Step 4 — recompile and smoke-test
 
 ```bash
 export CPDCTL_ENABLE_DSJOB=true
@@ -582,8 +639,8 @@ export CPDCTL_ENABLE_DSJOB=true
 | Scenario | What to do |
 |---|---|
 | **A — a project or a flow was lost.** Engine is healthy | This blueprint is not involved. Restore the project with [cp4d-example](../cp4d-example/), then recompile if `list-flows --with-compiled` says so |
-| **B — engine storage damaged, project assets intact** | Steps 1–3 above |
-| **C — rebuild from nothing** | 1. cluster + CP4D control plane + `ccs` (fresh install or `cpdbr`) → 2. **install DataStage at the same version** → 3. **engine state first**, Steps 1–3 above → 4. **project assets second**, via cp4d-example → 5. recompile, re-run jobs to rebuild Data Sets → 6. verify connections against the external sources |
+| **B — engine storage damaged, project assets intact** | Steps 1–4 above |
+| **C — rebuild from nothing** | 1. cluster + CP4D control plane + `ccs` (fresh install or `cpdbr`) → 2. **install DataStage at the same version** → 3. **engine state first**, Steps 1–3 above (prepare, restore, verify — recompiling comes at 5) → 4. **project assets second**, via cp4d-example → 5. recompile, re-run jobs to rebuild Data Sets → 6. verify connections against the external sources |
 
 Engine state must be restored **before** the project import: importing a project makes DataStage
 write into `/ds-storage/PXRuntime/Projects/<project-id>/`, and restoring the volume afterwards would
