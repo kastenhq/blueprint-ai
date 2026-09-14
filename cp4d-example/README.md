@@ -676,6 +676,58 @@ Document this per project so a restore is never silently incomplete. Bundle-leve
 
 ---
 
+## Projects containing DataStage flows
+
+If the CP4D installation has **DataStage** installed, this blueprint already protects the DataStage
+design assets, because they are ordinary project assets. Measured on CP4D 5.2.2 / DataStage 5.2.2
+(2026-09-09), a project exported with the same `cpdctl asset export start --assets-all-assets` this
+blueprint runs contained:
+
+| In the bundle | Notes |
+|---|---|
+| `data_intg_flow` | the flow itself |
+| `px_executables` | the **compiled** artifacts, as an attachment of the flow |
+| `job` | the runnable binding of flow + parameters + environment |
+| `data_intg_data_set` metadata **and** the Data Set *descriptor* files | the descriptor only — see below |
+| `data_intg_project_settings`, `environment` | project-level DataStage settings |
+| `data_asset` bytes | as for any project |
+
+Imported into a new, empty project, the flow came back reporting `Compiled: true` /
+`Need Compilation: false`, and **the restored job ran without being recompiled**. So no separate
+export path is needed for DataStage: `cpdctl dsjob export-project` produces a *smaller* bundle
+(DataStage components only) and is not required here.
+
+Three things a restore of such a project must account for:
+
+1. **Recompile if the flow says so.** Check with
+   `CPDCTL_ENABLE_DSJOB=true cpdctl dsjob list-flows --project <name> --with-compiled`. If
+   `Need Compilation` is `true`, run `cpdctl dsjob compile --project <name>` — with no `--name` it
+   compiles every flow in the project. Compiling is a real build step: it writes `OshScript.osh` and
+   a `lib/` directory onto the DataStage engine volume.
+2. **A Data Set is restored as a pointer, not a copy — which is correct for a recovery, and
+   dangerous when you clone.** A Data Set's *descriptor* travels in the bundle; its **data** lives
+   on the DataStage engine volume, which is shared by every project on that runtime instance. In a
+   real recovery the original is gone, or you are importing onto another cluster, so a descriptor
+   addressing engine storage is exactly right — the data files are simply absent until a job
+   rewrites them.
+
+   The hazard is **duplication**: a second copy of a project alongside the original on the *same*
+   runtime instance. Verified — the descriptor written into a freshly imported project is
+   **byte-identical** to the source project's, and reading the Data Set there returned the source's
+   rows **before any job had run**. Because a Data Set write deletes the existing data files before
+   rewriting them, running the imported job destroyed the source project's Data Set:
+   `view-dataset` on the **original** project then failed with `Sample data could not be read from
+   dataset …`. So: do not run the imported jobs while the original project still exists on the same
+   runtime instance.
+
+3. **Engine state is outside this blueprint.** Custom libraries (`user-lib`), ODBC/JDBC driver
+   configuration, Data Set data, files a flow writes to a file-system path, and user volumes live on
+   the DataStage engine PVCs and are in no project export. A flow that calls a custom routine will
+   restore fine and then fail at run time if the library is gone. See
+   [datastage-example](../datastage-example/), which protects exactly that and nothing else.
+
+---
+
 ## Remove everything
 
 The CP4D platform itself is out of scope here (installed and torn down independently). To create the
