@@ -147,3 +147,9 @@ environment available. You must build by speculating on the Red Hat KCS runbook 
 GitHub project for this operator is https://github.com/openstack-k8s-operators/mariadb-operator but there is little documentation. However, reading their code can help understand
 the functioning of this operator. As already stated at the beginning of this prompt we do not want you to test and validate (at least for the moment) because this environment is not
 available. Create the best possible starting point that will be validated with the customer in a future meeting.
+
+### DataStage on Cloud Pak for Data
+
+I already have a CP4D install on this cluster and we already developed a blueprint for the backup of the project that holds the Jupyter notebooks: cp4d-example. The customer is now asking for a blueprint
+for DataStage, a component that can be deployed inside that same CP4D infrastructure. I know nothing about DataStage except that it is an ETL, I do not know how to install it, and I have no idea how its
+backup and restore works — sometimes the approach is to reinstall bare and reload a dump, sometimes to reload from a bundle that reinstalls and reloads. Study the persistence model carefully before deciding anything.
