@@ -10,7 +10,7 @@ actions:
         name: pauseWalReplay
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.4
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.5
           command:
             - bash
             - -o
@@ -45,7 +45,7 @@ actions:
         name: resumeWalReplay
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.4
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.5
           command:
             - bash
             - -o
