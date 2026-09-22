@@ -120,6 +120,11 @@ because this is not adapted in the Kasten context. Instead I want you to documen
 The Barman configuration works with a local MinIO cluster, one MinIO cluster per CNPG instance.
 We are in pattern 5 "Database dump or snapshot through a local MinIO keeper (PVC mounted by a keeper, but the keeper exposes S3-protocol)" so you do not need to ask for validation of the pattern.
 
+### EDB Postgres for Kubernetes
+
+can you make a blueprint for edb; it's close in my opinion to cnpg in term of pattern but need to be checked.
+also in the readme can you explain the difference between edb and cnpg
+
 ### MongoDB Percona
 
 Create a blueprint for MongoDB deployed with the Percona operator.
