@@ -356,6 +356,61 @@ commit.
 
 Do not assume that the base image contains jq, yq or kubectl, most of the time you have to add them.
 
+#### Shared versus blueprint-local: the same rule everywhere
+
+The Dockerfile rule above — one canonical copy at the repo root for anything shared, a
+blueprint-local copy only when it genuinely cannot be shared — is the repository's general
+convention, not something specific to images. It applies equally to the slide-deck toolkit
+(`ppt-tools/` at the root, `<blueprint-dir>/ppt-tools/deck.py` holding only that blueprint's
+content) and to anything else more than one blueprint needs. Duplicating shared code into a
+blueprint directory reintroduces exactly the version drift the rule exists to prevent.
+
+#### Build the concept deck (do this once the README is written)
+
+Every blueprint ships a short slide deck beside its `README.md`. The README is what a reader
+works through while implementing; the deck is what you put on screen to explain the **concept**
+before anyone opens a YAML file. Reviewers and colleagues need to present these blueprints, and
+a reader who understands the pattern first gets far more out of the README.
+
+Build it with the **`veeam-pptx` skill**, through the shared toolkit:
+
+```bash
+python3 ppt-tools/build.py <blueprint-dir>        # writes <blueprint-dir>/<slug>.pptx
+```
+
+Write the content in `<blueprint-dir>/ppt-tools/deck.py` and commit **both** it and the built
+`.pptx`. The `.pptx` is committed on purpose: a colleague who needs to present the blueprint
+should not have to install a toolchain and a font bundle first. See
+[ppt-tools/README.md](ppt-tools/README.md) for the builders and the authoring rules.
+
+Ten to twelve slides, covering: what the workload is, the pattern chosen **and why**, what the
+backup does and does not protect, the architecture, the blueprint actions, and what restore
+involves. The deck explains the design; it does not reproduce the runbook.
+
+> ⛔ **No customer information, ever.** These decks live in a public repository and are built to
+> be presented to anyone. Never put in a deck — or the README — a customer or prospect name, a
+> cluster, namespace or hostname that identifies one, an internal URL, a support case or ticket
+> number, a real user name or email address, or any number given in confidence. When a blueprint
+> came out of a named engagement, describe the **workload**, never the customer. This applies to
+> the speaker notes and the file metadata as much as to the slides; the toolkit strips authorship
+> metadata on every build, but it cannot strip a customer name you typed onto a slide.
+
+**A material change to a blueprint must trigger a re-evaluation of its deck.** The deck is written
+by hand from the README, so nothing keeps the two in step automatically. Treat the deck as part of
+the blueprint, exactly like the "Blueprint actions" table. Re-read `deck.py` and update it in the
+**same commit** whenever you:
+
+- add, remove or rename an action, or materially change what an action does;
+- change the pattern, or the reasoning behind the pattern choice;
+- change the architecture — a new PVC, a keeper, a different data path, a new dependency;
+- change a prerequisite, a version in the versions table, or an image tag;
+- change what the restore procedure requires of an operator;
+- discover the blueprint does not protect something the deck implies it does.
+
+A typo fix or a reworded paragraph does not need a deck rebuild. A change that would make someone
+who watched the deck act incorrectly does. If you change the blueprint and conclude the deck still
+stands, say so explicitly in the commit message rather than leaving it unmentioned.
+
 ### Step 5 — Test Blueprint End-to-End
 
 Run a full backup/restore cycle through Kasten:

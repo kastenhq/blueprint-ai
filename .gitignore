@@ -5,3 +5,8 @@ feature-requests/
 features.conf
 *features.conf
 *-features.conf
+# Blueprint concept decks (*.pptx) are COMMITTED on purpose — a colleague who needs
+# to present a blueprint should not have to install a toolchain and a font bundle
+# first. See ppt-tools/README.md. Only local scratch decks are ignored.
+*.local.pptx
+~$*.pptx
