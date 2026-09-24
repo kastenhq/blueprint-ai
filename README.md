@@ -158,6 +158,12 @@ We are in pattern 5 "Database dump or snapshot through a local MinIO keeper (PVC
 can you make a blueprint for edb; it's close in my opinion to cnpg in term of pattern but need to be checked.
 also in the readme can you explain the difference between edb and cnpg
 
+### Cassandra (cass-operator)
+
+Can you make a blueprint for Cassandra?
+
+There is a consistency test that we need to do: put the cluster under heavy write and read operation, then do a backup and check if the cluster restores properly. To create this situation of heavy write and read you can create multiple pods in the namespace. Create a subfolder consistency-perf-test/ where you'll document the test and store the manifests.
+
 ### MongoDB Percona
 
 Create a blueprint for MongoDB deployed with the Percona operator.
