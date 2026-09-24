@@ -25,6 +25,61 @@ each one encodes the operator version, CR layout, storage class, credentials, na
 and consistency level of the deployment it was developed against, and is therefore a starting
 point to be adapted and re-validated — never a turnkey solution to be applied as-is.
 
+# Prerequisites
+
+- **Kasten** installed on the cluster (any supported version).
+- A **CSI storage class with snapshot support** — the legacy in-tree classes (for example, `gp2` on
+  AWS) do not support `VolumeSnapshot` and will fail. A matching `VolumeSnapshotClass` must be
+  registered with Kasten.
+- A **dedicated test cluster or namespace**. The agent deploys workloads, creates and deletes
+  resources, and runs full backup/restore cycles. Do not point it at a production cluster. See
+  [How the agent uses your cluster](#how-the-agent-uses-your-cluster) below.
+- An **AI coding agent** that honors the `AGENTS.md` convention — for example,
+  [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+  [Codex](https://openai.com/index/codex/),
+  [Gemini CLI](https://github.com/google-gemini/gemini-cli). The methodology is agent-agnostic;
+  it has been validated most extensively with Claude Code.
+
+# How the agent uses your cluster
+
+The agent needs direct access to the Kubernetes cluster through your current `kubeconfig` context.
+It **actively mutates cluster state**: deploying workloads, creating PVCs, triggering Kasten
+policies, deleting and recreating test data, and running restore operations. This is not
+read-only introspection — it is the full develop-and-test loop described in the
+[Workflow](#workflow) section below.
+
+This is inherent to how the methodology works. A blueprint is custom code executed against a live
+database; the only way to know it works is to run it. The agent follows a structured workflow with
+human approval gates at the architecture stage, but once a pattern is agreed it operates
+autonomously through the test-and-fix cycle, which requires the ability to create, modify, and
+destroy Kubernetes resources.
+
+**Use a dedicated test environment.** The agent creates test namespaces and workloads, and will
+delete and recreate them freely as part of its test-and-fix cycle. It does not go looking for
+unrelated resources to remove, but it operates with full `kubeconfig` privileges and makes no
+effort to protect namespaces it did not create. A shared or production cluster is not appropriate.
+
+# Workflow
+
+The agent follows a five-step process defined in [AGENTS.md](AGENTS.md). A brief overview:
+
+| Step | What happens | Human involvement |
+|---|---|---|
+| **1 — Choose pattern** | The agent evaluates the workload against 11 ranked [backup patterns](kasten-kanister.md#blueprint-patterns) (from fencing a replica to triggering a vendor operator's backup API) and recommends the best fit with rationale. | **Approval gate** — the agent stops and waits for your explicit go-ahead before proceeding. |
+| **2 — Deploy and seed** | Deploys the workload in a test namespace and creates a small representative dataset for validation. | Minimal — the agent works autonomously. |
+| **3 — Validate manually** | Proves the backup/restore workflow using `kubectl exec`, CSI snapshots, and direct API calls — no blueprint yet. | Minimal. |
+| **4 — Implement blueprint** | Writes the Blueprint YAML (and BlueprintBinding), documents prerequisites, and commits a `README.md`. | Review the output. |
+| **5 — End-to-end test** | Runs a full backup/restore cycle through a Kasten policy, verifies data recovery, and iterates until success. | Minimal. |
+
+An optional **Step 6** measures export deduplication efficiency for dump-based patterns.
+
+The patterns referenced in Step 1 are documented in detail in
+[AGENTS.md (Step 1)](AGENTS.md#step-1--choose-pattern-and-document-it) and
+[kasten-kanister.md (Blueprint patterns)](kasten-kanister.md#blueprint-patterns). The ranking
+balances consistency, downtime, RPO/RTO, storage cost, and implementation complexity — the agent
+does this analysis for you given the workload, so prompts can stay simple (see
+[Sample Prompts](#sample-prompts) below).
+
 # Container images
 
 Some blueprints need a tool image that the standard `gcr.io/kasten-images/kanister-tools` image
