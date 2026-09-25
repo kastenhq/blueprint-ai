@@ -28,9 +28,6 @@ point to be adapted and re-validated — never a turnkey solution to be applied 
 # Prerequisites
 
 - **Kasten** installed on the cluster (any supported version).
-- A **CSI storage class with snapshot support** — the legacy in-tree classes (for example, `gp2` on
-  AWS) do not support `VolumeSnapshot` and will fail. A matching `VolumeSnapshotClass` must be
-  registered with Kasten.
 - A **dedicated test cluster or namespace**. The agent deploys workloads, creates and deletes
   resources, and runs full backup/restore cycles. Do not point it at a production cluster. See
   [How the agent uses your cluster](#how-the-agent-uses-your-cluster) below.
