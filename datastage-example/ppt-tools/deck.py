@@ -20,6 +20,7 @@ d.agenda([
     "Where the design comes from",
     "Why there is no quiesce at backup time",
     "Deriving the flush set from the policy's own selector",
+    "What the policy captures, and how the restore frees the volumes",
     "Blueprint actions and restore prerequisites",
 ])
 
@@ -90,8 +91,8 @@ d.split_dark(
          "anything is snapshotted if the engine is not settled."),
         ("03", "MAINTENANCE MODE IS THE OTHER PATH",
          "It belongs to the offline backup path and to restores, not to a routine "
-         "backup. Putting the engine into maintenance mode for every snapshot would be "
-         "a departure from IBM's specification, not extra safety."),
+         "backup. Putting the engine into maintenance mode for every snapshot is not "
+         "what IBM's specification asks for, and it would not make the backup safer."),
     ],
     left_body="One detail worth copying: the PXRuntime entry in that rule has no name "
               "field, while the DataStage entry does. So it applies to every PXRuntime "
@@ -129,6 +130,28 @@ d.cards(
         ]),
     ])
 
+d.cards(
+    "What the policy captures, and how the restore frees the volumes",
+    "The filter has two entries: the labelled PVCs, and the one workload the hooks are bound to",
+    [
+        ('scan_target', "INCLUDE THE BOUND WORKLOAD, AND ONLY IT", [
+            "The hooks are bound to the runtime Deployment. Leave it out of the filter and "
+            "the hooks never run, and Kasten does not snapshot the PVC it mounts.",
+            "",
+            "But every included workload brings in every PVC it mounts, labelled or not. "
+            "Including all the DataStage workloads added three unlabelled PVCs, one of them "
+            "owned by another CP4D service. The runtime Deployment mounts only ds-storage.",
+        ]),
+        ('error_warning', "RESTORE: STOP WHAT IBM STOPS", [
+            "Kasten can only replace a PVC once no pod mounts it, and it scales down only "
+            "the workloads it restores — here, just one.",
+            "",
+            "So the pre-restore script parks the operator, then scales down the three "
+            "selectors IBM's own restore ConfigMap lists. After the restore, the operator "
+            "scales them back up itself.",
+        ]),
+    ])
+
 d.table_slide(
     "Versions and blueprint actions",
     "The sync runs last, so nothing can dirty the page cache after it",
@@ -151,7 +174,7 @@ d.table_slide(
     body_size=10.5,
     cards=[
         ('file_list', "TESTED VERSIONS", [
-            "Kubernetes 1.31.6 on OpenShift 4.18.6, Kasten 9.0.5, Cloud Pak for Data "
+            "Kubernetes 1.34.9 on OpenShift 4.21.30, Kasten 9.0.7, Cloud Pak for Data "
             "5.2.2, DataStage 5.2.2 with operator ibm-cpd-datastage-operator.v8.2.0, "
             "Common Core Services 11.2.0, cpdctl 1.10.3, cpd-cli 14.2.2. The ConfigMaps "
             "are versioned — 5.2.2 here — and IBM can change them between releases, so "
@@ -160,8 +183,9 @@ d.table_slide(
             "The same DataStage and CP4D version as the backup: compiled artifacts are "
             "engine-version specific, and a Data Set descriptor embeds the engine build "
             "string. DataStage must also already be installed and reconciled — nothing "
-            "restores into a DataStage that is not there. The install recreates the "
-            "empty volumes this restore then replaces."]),
+            "restores into a DataStage that is not there. Before the restore, run "
+            "prepare-restore.sh: it parks the operator and stops every pod mounting the "
+            "engine volumes."]),
     ])
 
 d.ending("TRANSCRIBE THE VENDOR'S SPECIFICATION, DO NOT GUESS IT",
