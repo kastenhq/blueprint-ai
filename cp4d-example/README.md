@@ -403,10 +403,12 @@ roleRef: { kind: Role, name: cp4d-backup-keeper, apiGroup: rbac.authorization.k8
 EOF
 ```
 
-> **Storage class**: the blueprint defaults to `managed-csi` (the Azure OpenShift CSI class used
-> when it was developed; the 2026-10-16 test used `ocs-storagecluster-ceph-rbd` on ODF). Replace it (in [blueprint.yaml](blueprint.yaml), `STORAGE_CLASS`) with a class that
-> supports **CSI snapshots** on your cluster (e.g. `ebs-sc` on AWS, `standard-rwo` on GKE) and has
-> a matching `VolumeSnapshotClass` registered with Kasten. Do **not** use legacy in-tree classes.
+> **Storage class**: the blueprint defaults to `ocs-storagecluster-ceph-rbd`, the ODF RBD class of
+> the cluster it was last tested on (it was first developed on Azure with `managed-csi`). Replace it
+> (in [blueprint.yaml](blueprint.yaml), `STORAGE_CLASS`) with a class that supports **CSI
+> snapshots** on your cluster (for example `managed-csi` on AKS, `ebs-sc` on AWS, `standard-rwo` on
+> GKE) and has a matching `VolumeSnapshotClass` registered with Kasten. Do **not** use legacy
+> in-tree classes.
 
 ### 4. A Location profile
 
