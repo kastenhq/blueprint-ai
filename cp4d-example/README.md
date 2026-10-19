@@ -59,16 +59,20 @@ unit of granularity = unit of multi-tenant restore**.
 
 ## Versions
 
-Detected on the cluster where this blueprint was developed and tested.
+Detected on the cluster where this blueprint was last tested (2026-10-16). It was first developed
+on OpenShift 4.18.6 / Kubernetes 1.31.6 / Kasten 8.5.12 / CP4D 5.2.x with `cpdctl` 1.8.244. The last
+revision validated on CP4D 5.2 is the git tag [`cp4d-5.2`](https://github.com/kastenhq/blueprint-ai/tree/cp4d-5.2).
 
 | Component | Version |
 |---|---|
-| Kubernetes | 1.31.6 |
-| OpenShift | 4.18.6 |
-| Kasten | 8.5.12 (Helm `k10-8.5.12`) |
-| Cloud Pak for Data / IBM Software Hub | 5.2.x (Watson Studio `ws` 11.2.0) |
-| cpdctl | 1.8.244 |
-| Keeper image | `ghcr.io/kastenhq/blueprint-ai/cp4d-backup:1.8.244-3` |
+| Kubernetes | 1.34.9 |
+| OpenShift | 4.21.30 |
+| Kasten | 9.0.7 (OLM operator `k10-kasten-operator-rhmp.v9.0.7`) |
+| Storage | ODF `ocs-storagecluster-ceph-rbd` |
+| Cloud Pak for Data / IBM Software Hub | 5.4.0 Patch 7 (`ibmcpd-cr` 5.10.7, Watson Studio `ws` 13.0.4, Common Core Services 13.0.6) |
+| cpdctl | 1.10.34 |
+| kubectl (in the keeper image) | 1.34.9 |
+| Keeper image | `ghcr.io/kastenhq/blueprint-ai/cp4d-backup:1.10.34-1` |
 
 Detect your Kasten version:
 
@@ -107,7 +111,7 @@ cpdctl config is rendered to a tmpfs path at runtime and never persisted.
 
 ```bash
 cd images/cp4d-backup
-docker buildx build --platform linux/amd64 -t <your-registry>/cp4d-backup:1.8.244-3 --push .
+docker buildx build --platform linux/amd64 -t <your-registry>/cp4d-backup:1.10.34-1 --push .
 ```
 
 > Use an **immutable tag** (or `imagePullPolicy: Always`, which the pod specs already set). A reused
@@ -166,7 +170,8 @@ the backed-up namespace, so it is never captured in a restore point.
 
 **The keeper authenticates with the API key alone — never a password.**
 [cpdctl-login.sh](images/cp4d-backup/cpdctl-login.sh) runs
-`cpdctl config user set svc --username … --apikey …`, and the Secret holds only `url`, `username`,
+`cpdctl config user set svc --username … --apikey-stdin` (the key is piped in, so it never
+appears on a command line or in the process table), and the Secret holds only `url`, `username`,
 `apikey` and `uid`. The `cpadmin` password is used once, on your workstation, to obtain the key; it
 is never stored in the backup namespace.
 
@@ -279,9 +284,9 @@ Verify the Secret is usable before deploying anything else. This mirrors exactly
 three keys (`url`, `username`, `apikey`) and runs the same two `cpdctl config` commands:
 
 ```bash
-./bin/cpdctl config user set svc \
-  --username "$(kubectl get secret cp4d-backup-cpdctl-creds -n cpd -o jsonpath='{.data.username}' | base64 -d)" \
-  --apikey   "$(kubectl get secret cp4d-backup-cpdctl-creds -n cpd -o jsonpath='{.data.apikey}'   | base64 -d)"
+kubectl get secret cp4d-backup-cpdctl-creds -n cpd -o jsonpath='{.data.apikey}' | base64 -d \
+  | ./bin/cpdctl config user set svc --apikey-stdin \
+      --username "$(kubectl get secret cp4d-backup-cpdctl-creds -n cpd -o jsonpath='{.data.username}' | base64 -d)"
 ./bin/cpdctl config profile set svc-check \
   --url "$(kubectl get secret cp4d-backup-cpdctl-creds -n cpd -o jsonpath='{.data.url}' | base64 -d)" --user svc
 ./bin/cpdctl config profile use svc-check
@@ -340,7 +345,7 @@ If enrolment fails, the prehook aborts **before any data moves** with
 | | |
 |---|---|
 | **The API key does not expire** | `expire_at` comes back `null`. Unlike the bearer token, it is a long-lived credential — treat the Secret accordingly, and rotate it deliberately. |
-| **The bearer token is short-lived** | The JWT from step 1 carries a **12-hour** lifetime. It is only needed for the setup calls; the keeper never uses it — it authenticates with `--apikey`, which is why no password lives in the cluster. |
+| **The bearer token is short-lived** | The JWT from step 1 carries a **12-hour** lifetime. It is only needed for the setup calls; the keeper never uses it — it authenticates with the API key (`--apikey-stdin`), which is why no password lives in the cluster. |
 | **`-k` skips TLS verification** | The `cpd` route usually presents the cluster's ingress certificate. Drop `-k` and pass `--cacert <ca.crt>` if you have the CA — leaving `-k` in a scripted, repeatable procedure is a habit worth avoiding. |
 | **Regenerating the key breaks the Secret** | `GET /usermgmt/v1/user/apiKey` (step 5) and the UI (*Profile and settings → API key*) both **generate a new key and invalidate the old one**. Because the keeper shares `cpadmin`'s key, anyone who regenerates it — by re-running step 5, or for their own scripts — breaks the backup: the stale key fails at `cpdctl` login time, inside `backupPrehook`, failing the whole backup. Update the Secret every time. |
 | **Don't leave the key in your shell history** | The commands above keep it in a variable rather than on a command line. If you paste a key literally, clear it afterwards. |
@@ -398,10 +403,12 @@ roleRef: { kind: Role, name: cp4d-backup-keeper, apiGroup: rbac.authorization.k8
 EOF
 ```
 
-> **Storage class**: the blueprint defaults to `managed-csi` (the Azure OpenShift CSI class used
-> here). Replace it (in [blueprint.yaml](blueprint.yaml), `STORAGE_CLASS`) with a class that
-> supports **CSI snapshots** on your cluster (e.g. `ebs-sc` on AWS, `standard-rwo` on GKE) and has
-> a matching `VolumeSnapshotClass` registered with Kasten. Do **not** use legacy in-tree classes.
+> **Storage class**: the blueprint defaults to `ocs-storagecluster-ceph-rbd`, the ODF RBD class of
+> the cluster it was last tested on (it was first developed on Azure with `managed-csi`). Replace it
+> (in [blueprint.yaml](blueprint.yaml), `STORAGE_CLASS`) with a class that supports **CSI
+> snapshots** on your cluster (for example `managed-csi` on AKS, `ebs-sc` on AWS, `standard-rwo` on
+> GKE) and has a matching `VolumeSnapshotClass` registered with Kasten. Do **not** use legacy
+> in-tree classes.
 
 ### 4. A Location profile
 
@@ -544,7 +551,7 @@ OS/arch from [github.com/IBM/cpdctl/releases](https://github.com/IBM/cpdctl/rele
 ```bash
 mkdir -p bin && cd bin
 # with the GitHub CLI — asks for the latest stable tag rather than hardcoding one:
-TAG=$(gh release view --repo IBM/cpdctl --json tagName -q .tagName)     # e.g. v1.8.244
+TAG=$(gh release view --repo IBM/cpdctl --json tagName -q .tagName)     # e.g. v1.10.34
 gh release download "$TAG" --repo IBM/cpdctl --pattern 'cpdctl_darwin_arm64.tar.gz'
 tar xzf cpdctl_darwin_arm64.tar.gz && rm cpdctl_darwin_arm64.tar.gz
 xattr -d com.apple.quarantine cpdctl 2>/dev/null                        # macOS Gatekeeper
@@ -568,7 +575,8 @@ oc get secret platform-auth-idp-credentials -n cpd -o jsonpath='{.data.admin_pas
 
 # keep the config file next to the binary and OUT of git (cp4d/bin/ is ignored)
 export CPDCONFIG=$PWD/bin/.cpdctl.config.json
-./bin/cpdctl config user set admin --username <admin-username> --password '<ADMIN_PASSWORD>'
+# --password-stdin keeps the password off the command line (cpdctl >= 1.10 warns about --password)
+printf '%s' '<ADMIN_PASSWORD>' | ./bin/cpdctl config user set admin --username <admin-username> --password-stdin
 ./bin/cpdctl config profile set cp4d --url https://<cpd-route-host> --user admin
 ./bin/cpdctl config profile use cp4d
 ./bin/cpdctl project list                       # verify connectivity
@@ -653,6 +661,21 @@ kubectl get restorepoint -n cp4d-projects-backup
 ./bin/cpdctl asset search --project-id <new-pid> --type-name notebook   --query '*:*'
 ./bin/cpdctl asset search --project-id <new-pid> --type-name data_asset --query '*:*'
 ```
+
+**Re-validated end-to-end on 2026-10-16 after upgrading CP4D from 5.2.2 to 5.4.0 Patch 7**
+(Kasten 9.0.7 / OpenShift 4.21.30, keeper image `1.10.34-1`, storage `ocs-storagecluster-ceph-rbd`).
+The blueprint itself needed no change for 5.4. The keeper image was rebuilt for a newer `cpdctl`
+and `kubectl`, and now passes the API key on stdin.
+
+| Check | Result |
+|---|---|
+| `cpadmin`'s *Backup Reader* role and API key after the upgrade | Both survived: `has_manage_project: true`, and the key in the Secret still authenticates |
+| `backupPrehook` through a `RunAction` | `Complete` in about 1 minute. 3 projects discovered, `cpadmin` already an editor on all 3, 3 export pods |
+| Snapshot scope | 3 PVCs, 3 CSI snapshots, one restore point |
+| Loss | The fixture project (notebook, job, file data asset, connection, connected data asset) **deleted** from CP4D |
+| Granular restore | A `RestoreAction` filtered to that one PVC restored only that PVC, into a new namespace |
+| `restore.sh` | Recreated the project under a new id: `importing 97 files … State: completed` |
+| Data check | The same five assets came back, and the file data asset `sample.csv` came back byte for byte |
 
 **Validated end-to-end on 2026-07-10** (Kasten 8.5.12 / CP4D 5.2.x): backup produced one PVC per
 project, all CSI-snapshotted into one restore point; a granular cross-namespace restore of a single
