@@ -66,7 +66,7 @@ assets, reachable through the CP4D project/asset APIs.*
 | **Parameter set** (+ value sets) | `parameter_set` | Named, reusable job parameters (for example one value set per environment) |
 | **Environment variables / `PROJDEF`** | parameter set | Project-wide parameter defaults — the `DSParams` of classic DataStage |
 | **Custom stages** | `data_intg_build_stage`, `data_intg_custom_stage`, `data_intg_wrapped_stage` | User-written stages |
-| **Libraries** | `custom_stage_library`, `function_library`, `data_intg_java_library`, `ds_xml_schema_library`, `ds_routine` | User code the flows call |
+| **Libraries** | `custom_stage_library`, `data_intg_parallel_function`, `data_intg_java_library`, `ds_xml_schema_library`, `ds_routine` | User code the flows call |
 | **Message handlers** | `ds_message_handler` | Rules that reclassify engine messages |
 | **Data quality assets** (Enterprise Plus) | `standardization_rule`, `ds_match_specification`, `data_quality_rule`, `data_quality_definition` | Standardization / matching / rules |
 | **Pipeline** (sequence job) | `orchestration_flow` | Orchestrates jobs — the modern DataStage *sequence* |

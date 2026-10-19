@@ -285,10 +285,9 @@ should change that warning to `exit 1` (the blueprint says where).
 >    **between** flows while the ultimate source and target are databases. A Sequential File stage
 >    writing to a path lands on `/px-storage/data` or a user volume no matter what the sources are.
 
-One case is genuinely mixed and was **not** measured: CP4D has project asset types for some library
-kinds (`function_library`, `custom_stage_library`, `ds_routine`), so a library added *as an asset*
-travels in the export, while one copied into `/ds-storage/user-lib` does not. Check which route your
-deployment uses before relying on either.
+A library created as a project asset travels with the project export and works after import
+(verified on 5.4.0 with a parallel function: the imported job ran without recompiling). Only files
+copied directly into `/ds-storage/user-lib` need this blueprint.
 
 Two further measurements worth knowing:
 
