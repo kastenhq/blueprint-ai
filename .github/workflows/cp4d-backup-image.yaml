@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - "cp4d-example/images/cp4d-backup/**"
+      - "cp4d-example/*/images/cp4d-backup/**"
   push:
     branches:
       - main
     paths:
-      - "cp4d-example/images/cp4d-backup/**"
+      - "cp4d-example/*/images/cp4d-backup/**"
 
 env:
   REGISTRY: ghcr.io
@@ -18,6 +18,11 @@ env:
 jobs:
   build-and-push-image:
     runs-on: ubuntu-latest
+    strategy:
+      # One image per CP4D version folder (cp4d-example/<version>/). Each folder pins its own
+      # cpdctl version, so the tags never collide. Add the version here when you add a folder.
+      matrix:
+        cp4d_version: ["5.2", "5.4"]
     permissions:
       contents: read
       packages: write
@@ -29,7 +34,7 @@ jobs:
         id: versions
         run: |
           # Tag is <cpdctl version without the leading v>-<image revision>
-          dockerfile=cp4d-example/images/cp4d-backup/Dockerfile
+          dockerfile=cp4d-example/${{ matrix.cp4d_version }}/images/cp4d-backup/Dockerfile
           cpdctl_version=$(grep -oP '(?<=ARG CPDCTL_VERSION=v)\S+' "$dockerfile")
           image_revision=$(grep -oP '(?<=ARG IMAGE_REVISION=)\S+' "$dockerfile")
           echo "image_tag=${cpdctl_version}-${image_revision}" >> "$GITHUB_OUTPUT"
@@ -40,9 +45,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha
+            type=sha,prefix=cp4d-${{ matrix.cp4d_version }}-sha-
             type=raw,value=${{ steps.versions.outputs.image_tag }},enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3 # v3.0.0
@@ -61,7 +65,7 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@2cdde995de11925a030ce8070c3d77a52ffcf1c0 # v5.3.0
         with:
-          context: cp4d-example/images/cp4d-backup
+          context: cp4d-example/${{ matrix.cp4d_version }}/images/cp4d-backup
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
