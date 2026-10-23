@@ -1,5 +1,10 @@
 # DataStage in one sitting — enough to design a backup for it
 
+> **Copied from the 5.4 folder.** The measurements in this file were taken on DataStage 5.4.7. On
+> 4.8.9 the volume layout, the engine paths and the process types are the same; IBM's backup
+> ConfigMaps are not (no online-backup specification), and `/ds-storage/user-lib` is not created by
+> the install. See [README.md](README.md) for what was measured on 4.8.9.
+
 > ## ⚠️ This is not DataStage documentation — use IBM's
 >
 > **To learn or use DataStage, go to IBM's official documentation, not this file.**
@@ -141,7 +146,7 @@ services.
 environment variable — without it, `cpdctl dsjob` simply does not appear.
 
 ```bash
-cd datastage-example
+cd datastage-example/5.4
 export CPDCONFIG=$PWD/bin/.cpdctl.config.json   # keep credentials out of $HOME and out of git
 export CPDCTL_ENABLE_DSJOB=true
 
@@ -424,8 +429,8 @@ Two things in this example belong to **other** backups.
 
 **The database.** The rows of `customers` and `customers_by_country` live on the PostgreSQL volume
 in `datastage-demo-db`. Neither the DataStage blueprint nor cp4d-example touches them. Back the
-database up with a blueprint made for it: [cnpg-example](../cnpg-example/) for CloudNativePG,
-[edb-example](../edb-example/) for EDB Postgres for Kubernetes. When you plan it, note which table
+database up with a blueprint made for it: [cnpg-example](../../cnpg-example/) for CloudNativePG,
+[edb-example](../../edb-example/) for EDB Postgres for Kubernetes. When you plan it, note which table
 really needs protecting: `customers` is source data, while `customers_by_country` is **derived** —
 re-running the job rebuilds it.
 
@@ -434,7 +439,7 @@ DataStage backup, the restored tables and the restored jobs do not describe the 
 simple fix after restoring both is to re-run the jobs that write derived tables.
 
 **The connection belongs to the CP4D project backup.** A connection is a project asset, so
-[cp4d-example](../cp4d-example/) protects it, with the flows and jobs. Measured on this project,
+[cp4d-example](../../cp4d-example/4.8/) protects it, with the flows and jobs. Measured on this project,
 `cpdctl asset export start --assets-all-assets` exported one each of `connection`,
 `data_intg_flow`, `job`, `data_intg_data_set`, `data_intg_project_settings` and `environment`, and
 the connection was in it **twice**:
@@ -447,7 +452,7 @@ the connection was in it **twice**:
 The DataStage blueprint also captures the compiled copy, as a side effect of snapshotting
 `/ds-storage`. That copy is **not** the source of truth: the project is. Restore the project with
 cp4d-example, then recompile (§4.7). For the clear-text password, see cp4d-example
-[DESIGN.md § 6](../cp4d-example/DESIGN.md#6-the-data-and-credential-boundary-validated-2026-07-10):
+[DESIGN.md § 6](../../cp4d-example/DESIGN.md#6-the-data-and-credential-boundary-validated-2026-07-10):
 export with an encryption key.
 
 ### 4.9 Clean up

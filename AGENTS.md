@@ -38,6 +38,39 @@ in a different context is a data-loss risk.
 Readers are expected to copy the directory, rename it, adapt it to their own deployment, then
 re-run Steps 2–5 to validate it. See the ownership disclaimer in [README.md](README.md).
 
+### One folder per product version, not one git tag
+
+When readers need a blueprint for **several product versions at the same time** (for example, CP4D
+4.8, 5.2 and 5.4 are all in use), put each validated version in its own subfolder:
+`<blueprint-dir>/<version>/`. Do not use git tags for this. A tag is hidden from someone who browses
+the repository, cannot be fixed without moving it, and keeps only one version visible on `main`.
+
+- The **version folder** holds everything that is run or followed: the runbook `README.md`
+  (versions table, Blueprint actions table, Initial prompt), the blueprint and binding YAML, the
+  policy, the scripts, the fixtures, and the image `Dockerfile` when the image differs by version.
+- The **top of the blueprint directory** holds what does not depend on the version: an index
+  `README.md` that lists the versions with a link to each folder, the design notes, the concept deck
+  and its `ppt-tools/deck.py`. The deck builder only finds decks at `<blueprint-dir>/ppt-tools/`.
+- A version folder is a **record of what was validated** on that version. Do not edit it when you
+  work on another version. To add a version, copy the nearest folder, adapt it, re-run Steps 2–5,
+  and add a row to the index.
+- If an image is built by CI from a version folder, **each version folder has its own image
+  folder**, even when two versions could share one image. The workflow finds the folders by
+  itself and builds every one (see `.github/workflows/cp4d-backup-image.yaml`).
+- **Tag a per-version image `<version folder>-r<IMAGE_REVISION>`**, for example `5.4-r1`. The
+  version is part of the tag, so two folders can never publish the same tag. Do not use a tool
+  version in the tag (`1.10.34-1`): two folders with the same tool version would overwrite each
+  other's image, and nothing would report it.
+- **Bump `ARG IMAGE_REVISION` on any change to the image folder**: the Dockerfile, a script, or a
+  pinned tool version (cpdctl, kubectl, and so on). Then update the tag in the blueprint, the
+  restore script, the README versions table and the deck, in the same commit. Once a blueprint on
+  `main` uses a tag, that tag is frozen: CI compares a hash of the folder with the
+  `blueprint-ai.folder-hash` label of the published image, and fails if they differ. A tag that no
+  blueprint on `main` uses yet can be rebuilt freely, so you can iterate on a branch with one
+  revision.
+
+See [cp4d-example](cp4d-example/) and [datastage-example](datastage-example/).
+
 ---
 
 ## Blueprint Development Workflow
@@ -347,6 +380,14 @@ while pulling `kasten-tools:8.5.2` is a bug: the tool image no longer matches th
 runs beside. When you bump the Kasten version in the versions table, bump every image reference in
 the same commit. You do not need to build the new tag — CI discovers referenced versions and
 publishes them automatically (see [images/kasten-tools/README.md](images/kasten-tools/README.md)).
+
+**To test a new image tag before the merge, publish it from your branch with CI**, not from a
+local Docker. Run the image workflow by hand (**Actions →** the workflow **→ Run workflow**) and pick
+your branch. `kasten-tools` then publishes the `<version>` tags your branch references, and a
+per-version image such as `cp4d-backup` publishes its `<version>-r<revision>` tag. The cluster
+then pulls the image CI built, which is the image the blueprint will use after the merge. Each
+workflow skips a tag whose published image is already up to date (it compares a hash label), so
+a branch run rebuilds only what is missing or changed.
 
 **Keep every pinned tool version in the Dockerfile equal to what the `README.md` documents.** This
 applies to `kubectl` (`ARG KUBECTL_VERSION` should match the Kubernetes version in the README
