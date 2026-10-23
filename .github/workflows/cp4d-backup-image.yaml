@@ -1,28 +1,57 @@
 name: cp4d-backup image
 
+# One image per CP4D version folder (cp4d-example/<version>/images/cp4d-backup/). The
+# folders are discovered, so adding cp4d-example/4.6/images/cp4d-backup/ needs no change
+# here.
+#
+# The tag is <version folder>-r<IMAGE_REVISION>, for example 5.4-r1. Once a blueprint on
+# main uses a tag, that tag never changes: if the folder content no longer matches the
+# published image, the job fails and asks for an IMAGE_REVISION bump. A tag no blueprint
+# on main uses yet (a branch under development) can be rebuilt as often as needed, so a
+# manual run from a branch publishes the image a blueprint needs before its PR is merged.
+
 on:
   workflow_dispatch:
   pull_request:
     paths:
       - "cp4d-example/*/images/cp4d-backup/**"
+      - ".github/workflows/cp4d-backup-image.yaml"
   push:
     branches:
       - main
     paths:
       - "cp4d-example/*/images/cp4d-backup/**"
+      - ".github/workflows/cp4d-backup-image.yaml"
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/cp4d-backup
 
 jobs:
+  discover-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.scan.outputs.versions }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
+
+      - name: Discover CP4D version folders
+        id: scan
+        run: |
+          set -euo pipefail
+          versions=$(ls -d cp4d-example/*/images/cp4d-backup | cut -d/ -f2 | sort -V \
+                       | jq -Rrn '[inputs | select(length > 0)] | tojson')
+          echo "versions=${versions}" >> "$GITHUB_OUTPUT"
+          echo "Building versions: ${versions}"
+
   build-and-push-image:
+    needs: discover-versions
     runs-on: ubuntu-latest
     strategy:
-      # One image per CP4D version folder (cp4d-example/<version>/). Each folder pins its own
-      # cpdctl version, so the tags never collide. Add the version here when you add a folder.
+      fail-fast: false
       matrix:
-        cp4d_version: ["5.2", "5.4"]
+        cp4d_version: ${{ fromJSON(needs.discover-versions.outputs.versions) }}
     permissions:
       contents: read
       packages: write
@@ -30,14 +59,71 @@ jobs:
       - name: Check out code
         uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
 
-      - name: Extract version tag from Dockerfile
-        id: versions
+      - name: Check published image
+        id: check
+        env:
+          DIR: cp4d-example/${{ matrix.cp4d_version }}/images/cp4d-backup
+          VERSION: ${{ matrix.cp4d_version }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # main as it was before this change: the commit before the push, or main itself
+          # for a pull request or a manual run.
+          MAIN_BEFORE: ${{ github.event_name == 'push' && github.event.before || github.event.repository.default_branch }}
         run: |
-          # Tag is <cpdctl version without the leading v>-<image revision>
-          dockerfile=cp4d-example/${{ matrix.cp4d_version }}/images/cp4d-backup/Dockerfile
-          cpdctl_version=$(grep -oP '(?<=ARG CPDCTL_VERSION=v)\S+' "$dockerfile")
-          image_revision=$(grep -oP '(?<=ARG IMAGE_REVISION=)\S+' "$dockerfile")
-          echo "image_tag=${cpdctl_version}-${image_revision}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          revision=$(grep -oP '(?<=^ARG IMAGE_REVISION=)\S+' "$DIR/Dockerfile")
+          cpdctl_version=$(grep -oP '(?<=^ARG CPDCTL_VERSION=v)\S+' "$DIR/Dockerfile")
+          tag="${VERSION}-r${revision}"
+          ref="${IMAGE}:${tag}"
+
+          # Hash of every file the build copies in, so a script change counts as well.
+          hash=$( (cd "$DIR" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
+                  | sha256sum | cut -c1-64)
+
+          # Images published before this workflow used <cpdctl>-<revision> tags and carry
+          # no hash label. Their new tag is added to the SAME image (same digest), so the
+          # blueprints keep the image they were validated with. Each entry is valid only
+          # while the folder hash is unchanged. Remove an entry once its tag is published.
+          legacy=""; legacy_hash=""
+          case "$tag" in
+            5.2-r3)        legacy=1.8.244-3; legacy_hash=ccab8e60f48008ea345ebc0644ebf1ed0fd7cc61b3c29c45ab842e4c020a71f3 ;;
+            4.8-r1|5.4-r1) legacy=1.10.34-1; legacy_hash=ffaee13c6229d3f19bd3ffcb377dd591be8b6be0b04117a7be191e6b449dc6ee ;;
+          esac
+
+          if published=$(docker buildx imagetools inspect "$ref" \
+                           --format '{{ index .Image.Config.Labels "blueprint-ai.folder-hash" }}' 2>/dev/null); then
+            exists=true
+            [ -z "$published" ] && published="$legacy_hash"
+          else
+            exists=false
+          fi
+
+          # Is the tag already used by a blueprint on main?
+          git fetch --quiet --depth=1 origin "$MAIN_BEFORE"
+          if git grep -qFw "cp4d-backup:${tag}" FETCH_HEAD -- cp4d-example; then frozen=true; else frozen=false; fi
+
+          if [ "$exists" = false ] && [ -n "$legacy" ] && [ "$hash" = "$legacy_hash" ]; then
+            action=retag; reason="new tag for the published image ${legacy}"
+          elif [ "$exists" = false ]; then
+            action=build; reason="not published yet"
+          elif [ "$published" = "$hash" ]; then
+            action=skip;  reason="published image is up to date"
+          elif [ "$frozen" = false ]; then
+            action=build; reason="folder changed, and no blueprint on main uses this tag yet"
+          else
+            echo "::error::${ref} is used on main and ${DIR} changed since it was published. Bump ARG IMAGE_REVISION in ${DIR}/Dockerfile, then update the tag in the ${VERSION} blueprint, restore.sh and README."
+            exit 1
+          fi
+
+          {
+            echo "action=${action}"
+            echo "tag=${tag}"
+            echo "ref=${ref}"
+            echo "hash=${hash}"
+            echo "cpdctl_version=${cpdctl_version}"
+            echo "legacy_ref=${IMAGE}:${legacy}"
+          } >> "$GITHUB_OUTPUT"
+          echo "${ref}: ${action} (${reason})"
 
       - name: Extract Docker metadata
         id: meta
@@ -45,10 +131,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha,prefix=cp4d-${{ matrix.cp4d_version }}-sha-
-            type=raw,value=${{ steps.versions.outputs.image_tag }},enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=raw,value=${{ steps.check.outputs.tag }}
 
       - name: Set up QEMU
+        if: steps.check.outputs.action == 'build'
         uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3 # v3.0.0
 
       - name: Set up Docker Buildx
@@ -63,10 +149,21 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
+        if: steps.check.outputs.action == 'build'
         uses: docker/build-push-action@2cdde995de11925a030ce8070c3d77a52ffcf1c0 # v5.3.0
         with:
           context: cp4d-example/${{ matrix.cp4d_version }}/images/cp4d-backup
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            blueprint-ai.folder-hash=${{ steps.check.outputs.hash }}
+            blueprint-ai.cpdctl-version=${{ steps.check.outputs.cpdctl_version }}
+
+      - name: Add the new tag to the published legacy image
+        if: steps.check.outputs.action == 'retag' && github.event_name != 'pull_request'
+        run: |
+          docker buildx imagetools create \
+            -t "${{ steps.check.outputs.ref }}" \
+               "${{ steps.check.outputs.legacy_ref }}"

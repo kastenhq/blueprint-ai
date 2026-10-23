@@ -1,17 +1,21 @@
 # DataStage on Cloud Pak for Data — engine-state protection with Kasten
 
-> **CP4D 5.4.** This is the 5.4 version of the blueprint. Other versions are listed in [../README.md](../README.md).
+> **CP4D 4.8.** This is the 4.8 version of the blueprint. Other versions are listed in [../README.md](../README.md).
+> It differs from 5.2 and 5.4 in two ways: IBM's 4.8 backup hooks are the **offline** ones
+> (maintenance mode around the backup), and the blueprint is bound to **every** DataStage workload
+> and coordinates them with a lock, because of a Kasten defect with shared volumes
+> ([details](#why-every-datastage-workload-is-bound-and-the-lock)).
 
-Protect the **DataStage parallel-engine state** inside an existing Cloud Pak for Data (IBM Software
-Hub) installation: custom libraries, ODBC/JDBC driver configuration, compiled job artifacts, run
-history, Data Set descriptors and Data Set data. Kasten snapshots the DataStage engine volumes; the
-blueprint runs IBM's own health precheck, flushes the filesystems before the snapshot, and takes the
-operator out of maintenance mode after a restore.
+Protect the **DataStage parallel-engine state** inside an existing Cloud Pak for Data installation:
+custom libraries, ODBC/JDBC driver configuration, compiled job artifacts, run history, Data Set
+descriptors and Data Set data. Kasten snapshots the DataStage engine volumes; the blueprint puts the
+DataStage operator in maintenance mode and flushes the filesystems before the snapshot, takes it out
+of maintenance afterwards, and does the same after a restore.
 
 > **This blueprint deliberately does not protect DataStage flows and jobs.** Those are CP4D
 > **project assets**, not engine state, and a project export/import restores them — verified, see
 > [What DataStage stores, and where](#what-datastage-stores-and-where). Use
-> [cp4d-example](../../cp4d-example/5.4/) for that half. The two blueprints are complementary and are
+> [cp4d-example](../../cp4d-example/4.8/) for that half. The two blueprints are complementary and are
 > deployed independently; [Restore](#restore) shows how they combine in a full rebuild.
 
 ---
@@ -23,7 +27,7 @@ operator out of maintenance mode after a restore.
    ┌──────────────────────────────────────────────────────────────--─┐
    │  8 DataStage service Deployments      PXRuntime "ds-px-default" │
    │  (assets, flows, runtime, canvas,     ┌──────────────────────-┐ │
-   │   caslite, migration, metrics,        │ px-runtime (conductor)│ │
+   │   caslite, migration, codegen,        │ px-runtime (conductor)│ │
    │   ds-nginx)                           │ px-compute-0/1        │ │
    │            │                          └───────────┬──────────-┘ │
    │            ▼                                      ▼             │
@@ -31,13 +35,15 @@ operator out of maintenance mode after a restore.
    │   compiled flows+jobs, run logs,          Data Set/File Set DATA│
    │   Data Set descriptors, user-lib,         (pds_files/node*),    │
    │   connectors/odbc                         engine + WLM config   │
+   │                                                                 │
+   │   ConfigMap datastage-backup-lock  (one quiesce per backup)     │
    └───────────────────┬───────────────────────────────┬────────────-┘
-                       │  Kasten snapshots these two PVCs (labelled)
-        backupPrehook  │                               │  restorePosthook
-   precheck dsStatus + │                               │  leave maintenance,
-   sync every writer   │                               │  wait for Completed
+                       │  Kasten snapshots the labelled PVCs
+   backupPrehook (×10, │  one per DataStage workload)  │  backupPosthook
+   leader: enable-maint│  followers: wait for leader   │  last one: disable-maint
+   + sync every writer │                               │  restorePosthook: same
                        ▼                               ▼
-                    Kasten policy on the cpd namespace, filtered
+          Kasten policy on the cpd namespace: labelled PVCs + every DataStage workload
 ```
 
 > **Engine vocabulary.** *Conductor*, *player*, *node* and *score* are parallel-engine terms, and
@@ -46,117 +52,113 @@ operator out of maintenance mode after a restore.
 > The short version: the conductor coordinates and writes no data, the players do the work and are
 > the only processes that write to the volumes this blueprint protects.
 
-**Pattern:** *pattern 2 — quiesce*, in the light form IBM itself specifies. There is no application
-freeze, because IBM's own **online** backup hooks for DataStage ask for almost nothing. The
-ConfigMap `datastage-maint-aux-ckpt-cm`, shipped by the install, requires a precheck that the
-`DataStage` and `PXRuntime` custom resources report `dsStatus == Completed`, with `on-error: Fail`.
-Since 5.4 it also asks for a **backup lock**: a file created before the snapshot and removed after
-it (see [The backup lock](#the-backup-lock--new-in-54)). On 5.2.2 its backup hooks were empty.
-Maintenance mode belongs to the **offline** path and to restores, not to a routine backup.
+**Pattern:** *pattern 2 — quiesce*, in the form IBM itself specifies for 4.8. On CP4D 4.8.9 the
+DataStage install ships **no online-backup specification** (`datastage-maint-aux-ckpt-cm`, which
+the 5.x blueprints follow, does not exist). The only backup specification is the **offline** one:
+put the `DataStage` and `PXRuntime` custom resources in maintenance mode before the backup and take
+them out after. Maintenance mode pauses the operator; it does **not** stop pods. Measured on 4.8.9:
+all 11 engine pods kept running, `dsStatus` reached `InMaintenance` in about a minute and returned to
+`Completed` about 5 minutes after leaving maintenance.
 
-That ConfigMap is one of three that together specify how DataStage must be protected, and this
-blueprint is a transcription of them. The full rule-by-rule mapping — including the one place the
-blueprint deliberately departs from IBM, and the one requirement that comes from Kasten rather than
-IBM — is in [Where this design comes from](#where-this-design-comes-from--ibms-own-backup-hooks).
-**Read that section before adapting this blueprint.**
+The full rule-by-rule mapping is in
+[Where this design comes from](#where-this-design-comes-from--ibms-own-backup-hooks). The one
+requirement that comes from Kasten rather than IBM — binding every workload, with a lock — is in
+[Why every DataStage workload is bound](#why-every-datastage-workload-is-bound-and-the-lock).
+**Read both before adapting this blueprint.**
 
 ---
 
 ## Where this design comes from — IBM's own backup hooks
 
-**Almost nothing in this blueprint was invented.** The DataStage install ships three ConfigMaps that
-IBM's own backup tool, `cpdbr`, reads to protect DataStage. They are a machine-readable
-specification of what must happen around a snapshot, written by the people who wrote DataStage. This
-blueprint is a transcription of them into Kanister.
+**Almost nothing in this blueprint was invented.** The DataStage install ships ConfigMaps that IBM's
+own backup tool, `cpdbr`, reads to protect DataStage. They are a machine-readable specification of
+what must happen around a snapshot, written by the people who wrote DataStage. This blueprint
+transcribes them into Kanister.
 
-Read them on your own cluster before adapting anything — they are versioned (`version: 5.4.7` here)
-and IBM **does** change them between releases — see the 5.2.2 → 5.4.7 differences below:
+Read them on your own cluster before adapting anything. IBM **does** change them between releases:
+4.8.9 has the offline set below and no online one; 5.2.2 and 5.4.7 have an online one too.
 
 ```bash
-kubectl get cm datastage-maint-aux-qu-cm   -n cpd -o yaml   # quiesce / unquiesce
-kubectl get cm datastage-maint-aux-br-cm   -n cpd -o yaml   # OFFLINE backup and restore
-kubectl get cm datastage-maint-aux-ckpt-cm -n cpd -o yaml   # ONLINE (checkpoint) backup
+kubectl get cm datastage-maint-aux-br-cm               -n cpd -o yaml   # OFFLINE backup and restore, DataStage CR
+kubectl get cm ds-px-default-pxruntime-maint-aux-br-cm -n cpd -o yaml   # the same for the PXRuntime CR
+kubectl get cm datastage-maint-aux-qu-cm               -n cpd -o yaml   # quiesce / unquiesce
+kubectl get cm datastage-maint-aux-ckpt-cm             -n cpd -o yaml   # ONLINE backup: NotFound on 4.8.9
 ```
 
 ### The mapping, rule by rule
 
 | IBM rule, and where it is written | What it says | Where it is in this blueprint |
 |---|---|---|
-| `ckpt-cm` → `precheck-meta.backup-hooks` | `check-condition {$.status.dsStatus} == {"Completed"}` on `DataStage` and on `PXRuntime`, **`on-error: Fail`** | `backupPrehook` step 1. Fails the backup before anything is snapshotted |
-| The same rule's `PXRuntime` entry has **no `name:` field** but a label, `icpdsupport/addOnId=datastage` (the `DataStage` entry has `name: datastage`). 5.2.2 had no label either | It applies to **every** `PXRuntime` CR carrying that label, not a named one | `backupPrehook`, `restorePosthook` and [prepare-restore.sh](prepare-restore.sh) loop over `kubectl get pxruntime -l icpdsupport/addOnId=datastage` rather than assuming `ds-px-default` |
-| `ckpt-cm` → `backup-meta.pre-hooks` (**new in 5.4**) | In the `flows` pod, container `flows`: `mkdir -p /ds-storage/PXRuntime/Projects && touch /ds-storage/PXRuntime/Projects/.backup_lock` | `backupPrehook` step 5, the same command in the same pod and container, **before** the flush |
-| `ckpt-cm` → `backup-meta.post-hooks` (**new in 5.4**) | In the same container: `rm -f /ds-storage/PXRuntime/Projects/.backup_lock` | `backupPosthook` |
-| `ckpt-cm` → `checkpoint-meta.exec-hooks` | `exec-rules: []` — **empty** (on 5.2.2 the pre- and post-hooks were empty too) | There is no quiesce phase at backup time beyond the lock |
-| `ckpt-cm` → `aux-meta.managed-resources: []` | The online path scales nothing down | The backup does not touch the workloads |
-| `br-cm` → `restore-meta.post-hooks` | `cpdbr.cpd.ibm.com/disable-maint` on `DataStage` and `PXRuntime`, `statusFieldName: dsStatus`, `timeout: 1800s` | `restorePosthook`: sets `ignoreForMaintenance: false` on both, then waits for `dsStatus == Completed`. The 1800 s timeout in the blueprint is IBM's number, not a guess |
-| `br-cm` → `aux-meta.managed-resources` | `deployment app.kubernetes.io/name=datastage`, `deployment app.kubernetes.io/component=px-runtime`, `statefulset app.kubernetes.io/component=px-compute` | [prepare-restore.sh](prepare-restore.sh) scales these three selectors down before the restore, as `cpdbr` does. They are **not** in the policy filter — see [Three things about Kasten filters](#three-things-about-kasten-filters-that-will-cost-you-a-backup) |
-| `br-cm` → `backup-validation-meta` | The backup must contain the ConfigMap `datastage-ibm-datastage-config-cm` | **Not captured** — see the note below |
-| `br-cm` / `ckpt-cm` → `plan-meta.groups` | The resources worth capturing are the `ds-config` ConfigMaps and the `DataStage` + `PXRuntime` CRs. Since 5.4 also `datastage-operator-resources`: the operator's Deployments, Services, ServiceAccounts and RBAC (`component-id,icpdsupport/addOnId=datastage`), because the operator is now installed by Helm in the instance, not by OLM | **Not captured** — see the note below |
-| `qu-cm` → `quiesce-meta` / `unquiesce-meta` | Quiesce **is** `enable-maint` and nothing else: no database flush, no application-level freeze. Unquiesce is `disable-maint` | Confirms that "quiesce" here costs nothing at the data layer, which is why pattern 2 is cheap for DataStage |
+| `br-cm` → `backup-meta.pre-hooks` | `cpdbr.cpd.ibm.com/enable-maint` on `DataStage` `datastage` and on `PXRuntime` `ds-px-default`, `statusFieldName: dsStatus`, `timeout: 1800s`, `on-error: Propagate` | `backupPrehook` (leader): sets `ignoreForMaintenance: true` on both and waits for `dsStatus == InMaintenance`, 1800 s. Before that it waits for `Completed`, so a CR in mid-reconcile is not parked |
+| `br-cm` → `backup-meta.post-hooks` | `disable-maint` on both, same timeout | `backupPosthook` (the one that runs last): sets `ignoreForMaintenance: false` and waits for `Completed` |
+| `br-cm` → `restore-meta.post-hooks` | `disable-maint` on both | `restorePosthook` |
+| `br-cm` → `aux-meta.managed-resources` | **empty** on 4.8.9 | Nothing is scaled down for a backup. At restore time [prepare-restore.sh](prepare-restore.sh) still scales the DataStage workloads down, because Kasten cannot replace a PVC that a pod mounts — see [Restore](#restore) |
+| The `PXRuntime` rules name `ds-px-default`; the CR carries no label on 4.8.9 | — | Every hook loops over **all** `PXRuntime` CRs in the namespace, so a second runtime instance needs no change |
+| `qu-cm` → `quiesce-meta` / `unquiesce-meta` | Quiesce **is** `enable-maint` and nothing else: no database flush, no application freeze | Confirms that "quiesce" here costs nothing at the data layer, which is why pattern 2 is cheap for DataStage |
 
-### The one place this blueprint deliberately differs
+Compared with 5.x, backup and restore now follow **the same** IBM path. On 5.2 and 5.4 the blueprint
+took its backup from IBM's online specification (a precheck, no maintenance mode) and its restore
+from the offline one. On 4.8 there is no online specification to take.
 
-IBM splits backup into two modes; this blueprint takes the backup from one and the restore from the
-other:
+> **Why the `ds-config` ConfigMap and the custom resources are not captured.** IBM's `cpdbr`
+> restores the whole service and puts them back first. This blueprint restores **volumes only**,
+> into a DataStage that is already installed (see [Restore](#restore)): the ConfigMap is maintained by
+> the operator, and restoring the `DataStage` and `PXRuntime` CRs over a live install could ask the
+> operator to go back to an older version.
 
-| | IBM's online path (`ckpt-cm`) | IBM's offline path (`br-cm`) | This blueprint |
-|---|---|---|---|
-| Backup | precheck only, no maintenance mode | `enable-maint` before, `disable-maint` after | **online** — precheck only |
-| Restore | `restore-meta.post-hooks` is **empty** | `disable-maint` + wait for `Completed` | **offline** — `disable-maint` + wait |
+### Why every DataStage workload is bound, and the lock
 
-The reason is what a Kasten restore actually does: it **replaces the PersistentVolumeClaims**. The
-workloads must be down while that happens, which is the offline situation, so the offline path's
-restore hook is the correct one. IBM's online restore hook is empty because `cpdbr`'s checkpoint
-restore does not replace volumes. Taking the empty one would leave the operator parked in
-maintenance mode after every restore.
+**The problem** (a Kasten defect, reported to Kasten engineering). The engine volumes are
+ReadWriteMany and shared: `/ds-storage` is mounted by 7 DataStage workloads. Kasten attributes a
+shared PVC to **one** of the workloads that mount it, picked non-deterministically, and only that
+workload's `backupPrehook` holds back the PVC's snapshot. The 5.x blueprints bind one workload
+(`runtime`). On 4.8 that was measured: both engine snapshots were created **in the same second the
+prehook started**, 3 minutes before maintenance mode and the flush were in place. The backup still
+reported `Complete`. On 5.x the prehook took a few seconds, which is why it was never noticed there.
 
-This is also why [Restore](#restore) starts with a **manual** step that does what IBM's offline path
-does: `enable-maint`, then scale down the `managed-resources` listed in `br-cm`. IBM's offline backup
-hook would have done both, and the online backup this blueprint performs does neither.
+Reproduced on a minimal namespace (one RWX PVC, two Deployments, a 60 s prehook on one of them):
+the snapshot waited for the hook in 5 of 9 runs with the same configuration, and 3 of 3 when only one
+workload mounted the PVC.
 
-> **Why the `ds-config` ConfigMap and the custom resources are not captured.** IBM validates that
-> `datastage-ibm-datastage-config-cm` is present in a `cpdbr` backup, and its restore plan puts it
-> back in the `restore-pre-operators` phase, before the operators run. That is right for `cpdbr`,
-> which restores the whole service. This blueprint restores **volumes only**, into a DataStage that
-> is already installed (see [Restore](#restore)), so:
->
-> - The ConfigMap (three keys: `pxDefaultInstanceID`, `startup-env.sh`, `import_license.sh`) is
->   created and kept up to date by the operator. A restore would bring nothing the install does not
->   already have.
-> - The operator resources (new in 5.4) are the operator itself. A restore into an installed
->   DataStage already has them, at the right version.
-> - The `DataStage` and `PXRuntime` CRs would be **harmful** to restore. If DataStage was upgraded
->   after the backup, applying the old `DataStage` spec can ask the operator to go back to the old
->   version.
->
-> An earlier version of the policy captured all three "for reference" and never restored them.
-> That made the restore point look more complete than it was, and anyone restoring it without the
-> documented filter would have applied the CRs over the live install.
+**The fix has two parts.**
 
-### The backup lock — new in 5.4
+1. **Bind and include every DataStage workload.** The BlueprintBinding and the policy select the same
+   set, `icpdsupport/addOnId=datastage` (9 Deployments and the `px-compute` StatefulSet). Whichever
+   workload Kasten picks for a PVC has a prehook. Both halves matter: a workload outside the policy
+   runs no hook at all ([below](#three-things-about-kasten-filters-that-will-cost-you-a-backup)).
+2. **A lock, so the work happens once.** Ten prehooks now start at about the same time. The ConfigMap
+   `datastage-backup-lock` is created with `kubectl create`, which is atomic: the one prehook that
+   succeeds is the **leader** and does the work (maintenance mode, then `sync`). The others are
+   **followers** and wait until the lock says `ready`. Because every prehook waits for the quiesce,
+   no snapshot can start before it.
 
-On 5.4.7, IBM's online backup creates `/ds-storage/PXRuntime/Projects/.backup_lock` before the
-snapshot and removes it afterwards. The blueprint does the same. What the file actually does was
-read from the 5.4.7 `flows` service code (`OnlineBackupManager`, `BackupSyncFilter` in
-`ds-common-library-utils` and `ds-flows`), because IBM's ConfigMap only says *what* to run:
+How the lock handles the rest, all tested:
 
-| Question | Answer |
+| Situation | What happens |
 |---|---|
-| Who reads it | The `flows` service, on each request to `data_intg_flows` |
-| What it blocks | Every request that is not a `GET` — creating, saving or deleting a flow — fails with `HTTP 409 "Online Backup is in progress, please wait for a while and retry."`. `GET` requests pass. The filter is on the flows API only; nothing in it touches the job runtime |
-| When it is active | **Only when the `flows` container runs with `ENABLE_BACKUP_DETECT=true`.** Nothing sets that variable on a default 5.4.7 install (checked on every Deployment, StatefulSet and ConfigMap in the namespace), so there the lock is created and removed and nothing reads it |
-| What happens if it is never removed | The `flows` service deletes a lock older than **4 hours**, checking every 30 minutes. A backup that dies between `backupPrehook` and `backupPosthook` therefore blocks flow edits for at most about 4.5 hours, and only where detection is enabled |
+| The leader fails | It marks the lock `failed` and leaves maintenance. Its followers fail too (each remembers the leadership *term* it waited for). The backup fails |
+| Kasten retries the job (an API server rollout drops every hook's connection; it happened twice in testing) | The lock records the UID of the running `BackupAction`. Kasten labels every VolumeSnapshot of the backup with the same value (`kasten_io_manifestid`), so a retried prehook can see whether the engine PVCs were already captured after the quiesce. If so it does nothing; if not, it takes over and quiesces again |
+| A lock left by a backup that died (cancelled, or a node lost) | The next backup sees that the lock's `BackupAction` is no longer running and takes it over. Two prehooks cannot both take over: the update carries the `resourceVersion` that was read, so only one succeeds |
+| A snapshot taken **before** the quiesce finished (the defect, if a mounting workload is not bound or not included) | The posthook compares this backup's snapshot of each labelled PVC with the time the lock became `ready`, and **fails the backup**. A silent unquiesced backup becomes a visible failure |
+| Kasten runs the workloads in waves of about five | The posthooks never wait for each other. Each workload's posthook runs right after that workload's snapshots, so the one that runs after the last engine snapshot sees all of them and releases maintenance |
 
-Three consequences for the blueprint:
+After a backup the lock stays in place with `state: released` — it is the record of that backup,
+and the next backup takes it over. To clear it by hand (after deleting the policy, for example):
 
-1. **The lock is taken before the flush.** It is a file on `/ds-storage`, so writing it after the
-   `sync` would dirty the page cache again.
-2. **The restore point contains the lock.** The snapshot is taken while it exists.
-   `restorePosthook` deletes it once the `flows` pod is back; otherwise, with detection enabled,
-   flows would stay read-only for up to 4 hours after every restore.
-3. **The flows pod must be running for a backup.** `backupPrehook` fails if it is not, because it
-   cannot take the lock. The precheck already requires `DataStage` to be `Completed`, so a backup
-   that passes the precheck has a running `flows` pod.
+```bash
+kubectl delete configmap datastage-backup-lock -n cpd
+kubectl patch datastage datastage -n cpd --type=merge -p '{"spec":{"ignoreForMaintenance":false}}'
+for px in $(kubectl get pxruntime -n cpd -o name); do
+  kubectl patch "$px" -n cpd --type=merge -p '{"spec":{"ignoreForMaintenance":false}}'
+done
+```
+
+**The cost.** Kasten snapshots every PVC that an included workload mounts. On 4.8.9 that adds
+`datastage-ibm-datastage-ds-migration-pvc` (5 Gi) and `conn-home-pvc` (Common Core Services', also
+mounted by the `wdp-connect-*` pods) to the restore point. The restore never selects them, so they
+cost storage, not correctness. The alternative — one policy-level hook for the whole `cpd`
+namespace — was rejected because every other service in `cpd` would then share a blueprint written
+for DataStage.
 
 ### Where the sync comes from — nowhere
 
@@ -172,23 +174,20 @@ mechanics, not IBM's, which is why it is not in the table above. See
 
 ## Versions
 
-Detected on the cluster where this blueprint was last tested (2026-10-16), after upgrading CP4D
-from 5.2.2 to 5.4.0 Patch 7. It was first developed on OpenShift 4.18.6 / Kubernetes 1.31.6 /
-Kasten 9.0.5 / CP4D 5.2.2 with the `nfs-csi` storage class. The last revision validated on CP4D 5.2
-is the git tag [`cp4d-5.2`](https://github.com/kastenhq/blueprint-ai/tree/cp4d-5.2).
+Detected on the cluster where this blueprint was developed and tested (2026-10-23).
 
 | Component | Version |
 |---|---|
-| Kubernetes | 1.34.9 |
-| OpenShift | 4.21.30 |
-| Kasten | 9.0.7 (OLM operator `k10-kasten-operator-rhmp.v9.0.7`) |
-| Storage | ODF `ocs-storagecluster-cephfs`, snapshot class `ocs-storagecluster-cephfsplugin-snapclass` |
-| Cloud Pak for Data / IBM Software Hub | 5.4.0 Patch 7 (`ibmcpd-cr` 5.10.7, ZenService 6.10.7) |
-| DataStage | 5.4.7 — component `datastage_ent`, Helm chart `datastage-ent` 12.0.7 (on 5.4 the operator is installed by Helm, no longer by OLM) |
-| Common Core Services (prerequisite of DataStage) | 13.0.6 |
+| Kubernetes | 1.31.14 |
+| OpenShift | 4.18.56 (self-managed on Azure) |
+| Kasten | 9.0.8 (Helm `k10-9.0.8`) |
+| Storage | `nfs-csi` (csi-driver-nfs 4.13.5, RWX), snapshot class `csi-nfs-snapclass` |
+| Cloud Pak for Data | 4.8.9 (`ibmcpd-cr` 4.8.9, Zen 5.1.15) — out of IBM support since 31 July 2025 |
+| DataStage | 4.8.9 — component `datastage_ent`, operator `ibm-cpd-datastage-operator.v5.9.0` (OLM) |
+| Common Core Services (prerequisite of DataStage) | 8.9.0 |
 | `cpdctl` | 1.10.34 |
-| `cpd-cli` | 14.4.0 (EE) |
-| Tool image | `ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.7` ([Dockerfile](../../images/kasten-tools/Dockerfile)) |
+| `cpd-cli` | 13.1.9 (EE) |
+| Tool image | `ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.8` ([Dockerfile](../../images/kasten-tools/Dockerfile)) |
 
 Detect your Kasten version:
 
@@ -197,14 +196,10 @@ helm ls -n kasten-io
 # or (OpenShift OLM): kubectl get csv -n kasten-io -o jsonpath='{.items[?(@.spec.displayName=="Kasten K10")].spec.version}'
 ```
 
-> **Tool image note.** The blueprint references `kasten-tools:9.0.7`, matching the Kasten version
-> above, and the 2026-10-16 test ran with exactly that image. (The 2026-10-15 test had to use
-> `9.0.5`, because `9.0.7` was not published yet.) CI publishes a tag for every referenced
-> version, but only on a push to the default branch — the workflow sets
-> `push: ${{ github.event_name != 'pull_request' }}` — so while a blueprint is still in review its
-> tag builds green **without being pushed**, and a `backupPrehook` referencing it fails with
-> `ImagePullBackOff`. If you are developing a blueprint against a version CI has not published yet,
-> run it against the newest published tag until yours merges.
+> **Tool image note.** The tests here ran with an image built inside the test cluster from the same
+> Dockerfile and build argument (`KASTEN_VERSION=9.0.8`), because `kasten-tools:9.0.8` was not
+> published yet and the image workflow could not yet publish from a branch. It can now: see
+> [images/kasten-tools/README.md](../../images/kasten-tools/README.md).
 
 ---
 
@@ -212,11 +207,11 @@ helm ls -n kasten-io
 
 | Path | What |
 |---|---|
-| [install-note.md](install-note.md) | A record of the environment this blueprint was validated against: what the DataStage install creates (pods, PVCs, volume layout) and IBM's `cpdbr` maintenance ConfigMaps. **Not installation documentation — use [IBM's](https://www.ibm.com/docs/en/software-hub/5.4.x) for that** |
-| [minimal-tutorial.md](minimal-tutorial.md) | What DataStage is, every object it has and **which store each one lives in**, plus a small ETL job between two PostgreSQL tables with its artifacts — and the copies of its connection — measured on disk. The evidence behind this blueprint's scope. **Not DataStage documentation — use [IBM's](https://www.ibm.com/docs/en/software-hub/5.4.x)** |
-| [blueprint.yaml](blueprint.yaml) | The blueprint: `backupPrehook` (precheck + backup lock + flush), `backupPosthook` (release the lock), `restorePosthook` (leave maintenance, remove the restored lock) |
-| [blueprintbinding.yaml](blueprintbinding.yaml) | Binds it to the single DataStage `runtime` Deployment |
-| [policy.yaml](policy.yaml) | Kasten policy on the `cpd` namespace, filtered to the labelled PVCs and the bound `runtime` Deployment |
+| [install-note.md](install-note.md) | **Measured on DataStage 5.4.7, copied from the 5.4 folder.** The volume layout and process types are the same on 4.8.9; the ConfigMaps are not (see above). A record of an environment this blueprint was validated against: what the DataStage install creates (pods, PVCs, volume layout) and IBM's `cpdbr` maintenance ConfigMaps. **Not installation documentation — use [IBM's](https://www.ibm.com/docs/en/software-hub/5.4.x) for that** |
+| [minimal-tutorial.md](minimal-tutorial.md) | **Measured on DataStage 5.4.7, copied from the 5.4 folder.** What DataStage is, every object it has and **which store each one lives in**, plus a small ETL job between two PostgreSQL tables with its artifacts — and the copies of its connection — measured on disk. The evidence behind this blueprint's scope. **Not DataStage documentation — use [IBM's](https://www.ibm.com/docs/en/software-hub/5.4.x)** |
+| [blueprint.yaml](blueprint.yaml) | The blueprint: `backupPrehook` (lock, then the leader enters maintenance and flushes), `backupPosthook` (the last one leaves maintenance), `restorePosthook` (leave maintenance) |
+| [blueprintbinding.yaml](blueprintbinding.yaml) | Binds it to every DataStage workload (`icpdsupport/addOnId=datastage`) |
+| [policy.yaml](policy.yaml) | Kasten policy on the `cpd` namespace, filtered to the labelled PVCs and the same DataStage workloads |
 | [prepare-restore.sh](prepare-restore.sh) | Restore Step 1: parks the operator and blocks until `dsStatus == InMaintenance`, checks for in-flight jobs, the PVC label and the restore point, then scales the DataStage workloads down and waits until no pod mounts a labelled PVC |
 | [fixture/make-flow.py](fixture/make-flow.py) | Generates the example DataStage flow this README's Kasten test uses (and documents the flow-JSON format) |
 | [fixture/customers-etl.json](fixture/customers-etl.json) | The generated flow: self-contained, writes only to the engine volumes |
@@ -231,7 +226,7 @@ Three stores, measured on the cluster rather than taken from documentation.
 
 | # | Store | What is in it | Protected by |
 |---|---|---|---|
-| 1 | **CP4D project assets** | flows, jobs, connections, parameter sets, table definitions, project settings, runtime environments, Data Set *assets* | [cp4d-example](../../cp4d-example/5.4/) — a project export/import |
+| 1 | **CP4D project assets** | flows, jobs, connections, parameter sets, table definitions, project settings, runtime environments, Data Set *assets* | [cp4d-example](../../cp4d-example/4.8/) — a project export/import |
 | 2 | **DataStage engine PVCs** | `/ds-storage` (100 Gi RWX): compiled flows and jobs, run history and logs, Data Set **descriptors**, `user-lib` custom libraries, `connectors/odbc`. `/px-storage` (10 Gi RWX, one per runtime instance): Data Set / File Set **data** in `pds_files/node*`, files written to file-system paths, engine and workload-manager configuration. Plus any **user volume** (`volumes-<name>-pvc`) an administrator mounted into the runtime for flows doing plain file I/O | **this blueprint**, for every PVC you label — see [Prerequisites §2](#2-label-the-pvcs-to-protect) |
 | 3 | **External data sources** | the databases and files the flows read and write, behind connections | whoever owns that database |
 
@@ -301,7 +296,7 @@ CP4D has two commands that export a project. We measured both on the example pro
 | Command | What it captured | Use |
 |---|---|---|
 | `cpdctl dsjob export-project` | DataStage components only (5.1 KB): the flow, the job, and the compiled `px_executables` with `--include-binaries`. **Not** the Data Set asset, the project settings or the runtime environment, even with `--include-data-assets`: it follows the dependency graph outward from the flows, and leaves out anything the flows do not reference | None. It is not a project backup |
-| `cpdctl asset export start --assets-all-assets` | The whole project (160 KB, 94 files): every asset's metadata, the bytes of uploaded files, the compiled binaries, the Data Set **descriptor**, and the connections — with their passwords in clear text unless you pass `--encryption-key` (seen again on 5.4.7, [tutorial §4.8](minimal-tutorial.md#48-what-the-datastage-backup-does-not-protect)) | The **project** half. [cp4d-example](../../cp4d-example/5.4/) uses it |
+| `cpdctl asset export start --assets-all-assets` | The whole project (160 KB, 94 files): every asset's metadata, the bytes of uploaded files, the compiled binaries, the Data Set **descriptor**, and the connections — with their passwords in clear text unless you pass `--encryption-key` (seen again on 5.4.7, [tutorial §4.8](minimal-tutorial.md#48-what-the-datastage-backup-does-not-protect)) | The **project** half. [cp4d-example](../../cp4d-example/4.8/) uses it |
 
 Neither export contains what exists only on the engine volumes: the Data Set **data** in
 `/px-storage/pds_files`, files a flow wrote to a path (`customers.txt`), and the instance-level
@@ -355,77 +350,43 @@ Two further measurements worth knowing:
 
 ## Three things about Kasten filters that will cost you a backup
 
-All three were found the hard way on this blueprint. The first two fail **silently** — the backup
-reports `Complete`. The third puts things in the restore point that you did not ask for.
+Found on the 5.2 and 5.4 versions of this blueprint and confirmed on 4.8. The first two fail
+**silently** — the backup reports `Complete`. With the 4.8 lock, both now make the backup **fail**
+instead, because the posthook does not find a snapshot taken after the quiesce.
 
-**1. A bound blueprint plus a filter that excludes its workload means no volume snapshot.** This
-blueprint binds to `datastage-ibm-datastage-runtime`. When the policy filter named the engine PVCs
-but not the DataStage workloads, `ds-storage` — the volume that Deployment mounts — was **not
-snapshotted**, while `px-storage`, `ds-temp`, `ds-migration` and `conn-home`, mounted by workloads
-with no binding, were captured even though the filter did not name them.
-
-Isolated in a two-object test namespace (one PVC, one Deployment) and raised with Kasten
-engineering. Measured there, two runs per row:
+**1. A bound workload that the filter excludes means no snapshot of the PVC Kasten attributes to it**
+(also reported to Kasten engineering). Measured on 5.2 in a two-object test
+namespace (one PVC, one Deployment), two runs per row:
 
 | Filter on the policy | BlueprintBinding on the workload | VolumeSnapshot |
 |---|---|---|
 | `includeResources`: the PVC only | **yes** | **none** — restore gives an empty volume |
 | `includeResources`: the PVC only | no | 1 |
-| `excludeResources`: the Deployment | **yes** | **none** |
-| `excludeResources`: the Deployment | no | 1 |
 | no filter | yes | 1 |
-| no filter | no | 1 |
 
-Every action stays green in the failing row: backup `Complete`, restore point created, restore
-`Complete`, PVC `Bound`, volume empty. The workaround is to include the **bound workload** in the
-filter — `datastage-ibm-datastage-runtime`, and only that one (see point 3). That is what
-[policy.yaml](policy.yaml) does.
+On 4.8, with a shared RWX PVC, two bound Deployments and a filter including only one of them: no
+VolumeSnapshot of the PVC at all in 3 backups and their retries. This is why
+[policy.yaml](policy.yaml) includes **every** bound workload.
 
-`ds-storage` is mounted by seven other DataStage Deployments and by `px-runtime` and `px-compute`,
-none of which are in the filter. That does not trigger the defect: verified on 2026-10-15, the
-restore point contains `ds-storage`.
-
-**2. If the filter excludes every workload, your hooks never run.** The BlueprintBinding matches a
-Deployment. Filter the Deployments out and nothing matches, so `backupPrehook` is never executed —
-no precheck, no flush — and the backup still reports success. The first four test runs here were
-exactly that: green backups with no hook execution at all. This one is **not** a product defect: a
-hook is bound to a workload, and a workload that is not in the backup has nothing to run against.
-It is listed here because the consequence for a blueprint author is the same as a bug — you lose
-your quiesce and your flush, silently — and because nothing warns you.
+**2. A workload outside the backup runs no hook.** A hook is bound to a workload; a workload that is
+not in the backup has nothing to run against. With one bound workload, filtering it out means no
+quiesce and no flush. With every workload bound, filtering some out reopens
+[the shared-volume defect](#why-every-datastage-workload-is-bound-and-the-lock). Keep the binding selector and the
+policy's workload entries identical.
 
 A related trap when testing: **a BlueprintBinding selector is not scoped to a namespace.** A binding
-on a common label attaches to matching workloads anywhere in the cluster, which is easy to do by
-accident and changes the result of unrelated backups.
+on a common label attaches to matching workloads anywhere in the cluster.
 
 **3. An included workload brings in every PVC it mounts, labelled or not.** The entries in
 `includeResources` add to each other; a PVC label entry cannot remove a PVC that a workload entry
-brought in. An earlier version of this policy included all the DataStage workloads (the three
-`managed-resources` selectors from IBM's `br-cm`). Every restore point then held **five** volume
-snapshots instead of two:
+brought in. On 4.8 that is accepted on purpose: the restore point holds 4 volume snapshots, the 2
+labelled engine PVCs plus `ds-migration` and `conn-home-pvc`. The restore filter selects only the
+labelled ones.
 
-| PVC | Labelled | Brought in by | Problem |
-|---|---|---|---|
-| `datastage-ibm-datastage-ds-temp-pvc` (20 Gi) | no | Deployment `…-assets` | Scratch space, snapshotted for nothing |
-| `datastage-ibm-datastage-ds-migration-pvc` (5 Gi) | no | Deployment `…-migration` | Same |
-| `conn-home-pvc` (5 Gi) | no | `px-runtime`, `px-compute` | **Not DataStage's.** It belongs to Common Core Services (`icpdsupport/addOnId=ccs`) and is also mounted by `wdp-connect-connection`, `wdp-connect-connector` and `wdp-connect-flight`. A restore that replaced it would either fail, because those pods still mount it, or put another service's data back in time without stopping that service |
-
-It also made the label claim in [Prerequisites §2](#2-label-the-pvcs-to-protect) false, and the
-prehook did not flush those three PVCs on purpose. So the policy includes **only the bound
-workload**, which mounts `ds-storage` and nothing else.
-
-That has a consequence at restore time. Kasten can only replace a PVC once no pod mounts it, and it
-scales down only the workloads it restores. A `RestoreAction` that does not stop every mount holder
-**fails**, loudly:
-
-```
-Failed to delete PVC ... datastage-ibm-datastage-ds-storage-pvc
-Timeout while polling (1m59s)
-```
-
-The restore point holds one workload, so [prepare-restore.sh](prepare-restore.sh) scales the others
-down first, with the selectors IBM's `br-cm` lists for exactly this purpose. The operator is parked
-at that point, so it does not scale them back up; it does so itself once `restorePosthook` takes it
-out of maintenance.
+`conn-home-pvc` is **not DataStage's**: it belongs to Common Core Services and is also mounted by
+`wdp-connect-connection`, `wdp-connect-connector` and `wdp-connect-flight`. A restore that replaced
+it would either fail, because those pods still mount it, or put another service's data back in
+time. Never add it to a restore filter.
 
 ---
 
@@ -438,7 +399,7 @@ This blueprint assumes CP4D is already installed and DataStage added on top
 (6.5 vCPU / 24.5 GiB of requests) and 4 ReadWriteMany PVCs in the `cpd` namespace.
 
 Install DataStage by following **IBM's official documentation**:
-<https://www.ibm.com/docs/en/software-hub/5.4.x> → *Installing* → *Services* → *DataStage*. IBM
+<https://www.ibm.com/docs/en/cloud-paks/cp-data/4.8.x> → *Installing* → *Services* → *DataStage*. IBM
 owns the supported procedure and keeps it current.
 
 [install-note.md](install-note.md) records what our install produced — the resulting pods and PVCs,
@@ -446,10 +407,10 @@ what is on each volume, and IBM's `cpdbr` maintenance ConfigMaps. It is there so
 your installation with the one this blueprint was validated against and see where yours differs,
 **not** as an install procedure to follow.
 
-> **Storage class**: DataStage requires an **RWX** class for `/ds-storage` and `/px-storage`. This
-> blueprint was tested with `ocs-storagecluster-cephfs` on ODF (snapshot class
-> `ocs-storagecluster-cephfsplugin-snapclass`) and, earlier, with `nfs-csi` (`csi-nfs-snapclass`),
-> each with a matching `VolumeSnapshotClass` registered with Kasten. Replace it with an RWX class
+> **Storage class**: DataStage requires an **RWX** class for `/ds-storage` and `/px-storage`. The
+> 4.8 version was tested with `nfs-csi` (csi-driver-nfs, snapshot class `csi-nfs-snapclass`); the
+> 5.x versions with `ocs-storagecluster-cephfs` on ODF. Each needs a matching `VolumeSnapshotClass`
+> registered with Kasten. Replace it with an RWX class
 > that supports CSI snapshots on your cluster (for example `efs-nfs-client` on AWS, `ontap-nas` on
 > NetApp Trident). Do **not** use legacy in-tree classes — they do not support CSI snapshots.
 
@@ -465,16 +426,15 @@ kubectl label pvc -n cpd \
   blueprint-ai/datastage-engine=true --overwrite
 ```
 
-**This label is the single source of truth.** The policy selects PVCs with it, and `backupPrehook`
-reads the same label to decide which pods to flush. Anything you do not label is neither
-snapshotted nor flushed.
+**This label is the single source of truth for what is protected.** The policy selects PVCs with
+it; `backupPrehook` reads it to decide which pods to flush; `backupPosthook` reads it to decide which
+snapshots must exist, taken after the quiesce, before it leaves maintenance. Anything you do not
+label is not flushed and not checked.
 
-That holds only because the policy's one workload entry, the `runtime` Deployment, mounts
-`ds-storage` and nothing else. If you add a workload to the policy filter, every PVC it mounts is
-snapshotted too, labelled or not — see
+The DataStage workloads in the policy also bring in the PVCs they mount, labelled or not
+(`ds-migration`, `conn-home-pvc` on 4.8.9) — see
 [point 3 of the filter section](#three-things-about-kasten-filters-that-will-cost-you-a-backup).
-After any change to the filter, check that a backup produces one volume snapshot per labelled PVC
-and no more.
+Those are snapshotted but not protected: they are not flushed, not checked, and not restored.
 
 Two cases where the default two lines are not enough — **check both on your cluster**:
 
@@ -502,14 +462,17 @@ The prehook tells you when the labelling is wrong, rather than failing quietly:
 
 ```
 PVCs carrying blueprint-ai/datastage-engine=true: datastage-…-ds-storage-pvc ds-px-default-…-px-storage-pvc
-WARNING: no PVC carries the label. The policy selects on it, so this backup
-         probably captures NO volume at all. See Prerequisites in README.md.
-WARNING: PVC volumes-myfiles-pvc is labelled for backup but no running pod mounts it; it cannot be flushed
+WARNING: no PVC carries the label; this backup probably captures NO engine volume
+WARNING: PVC volumes-myfiles-pvc is labelled but no running pod mounts it; it cannot be flushed
+WARNING: pod <name> mounts an engine PVC but is not a DataStage workload; its snapshot may not wait for this hook
 ```
 
 The second warning matters: a labelled PVC that no running pod mounts gets snapshotted **without a
 flush**, which is exactly the 0-byte-file hazard the flush exists to prevent. Either start the pod
-that consumes it, or accept the risk knowingly.
+that consumes it, or accept the risk knowingly. The third names a pod outside the BlueprintBinding
+that mounts an engine PVC — typically a user volume shared with another service. Kasten may pick
+that pod's workload for the PVC and snapshot it without waiting (the shared-volume defect); the posthook then fails
+the backup.
 
 Verified: the label survives both an operator reconciliation and a Kasten restore of the PVC.
 
@@ -546,28 +509,32 @@ spec:
   subject: { apiVersion: config.kio.kasten.io/v1alpha1, kind: Policy, name: datastage-engine-backup, namespace: kasten-io }
 EOF
 
-# one snapshot per labelled PVC should appear — two on a default install
+# four snapshots on a default 4.8.9 install: the two labelled engine PVCs, plus ds-migration and
+# conn-home-pvc brought in by the DataStage workloads
 kubectl get volumesnapshot -n cpd
 ```
 
 Check the hook actually ran — do not rely on the action being green (see the filter warnings above):
 
 ```bash
-kubectl logs -n kasten-io -l run=kanister-svc --tail=2000 | grep -E "dsStatus|synced|flushed"
+kubectl logs -n kasten-io deploy/kanister-svc --tail=5000 | grep -oE '(Deployment|StatefulSet)/[a-z0-9-]+: [^"\\]*' | sort -u
+# expect one LEADER, "flushed N pod(s)", FOLLOWER or "nothing to do" for the others,
+# and one "every engine PVC snapshotted after <time>; left maintenance"
+kubectl get configmap datastage-backup-lock -n cpd -o jsonpath='{.data.state}{"\n"}'   # released
 ```
 
 ---
 
 ## Blueprint actions
 
+Every action runs once per bound DataStage workload (10 on 4.8.9). The lock decides which one does
+the work.
+
 | Action | Trigger | What it does |
 |---|---|---|
-| `backupPrehook` | Before Kasten snapshots the volumes | Runs IBM's precheck — the `DataStage` CR and **every** `PXRuntime` CR labelled `icpdsupport/addOnId=datastage` must report `.status.dsStatus == Completed`, otherwise the backup fails before anything is captured. Discovers every running pod that mounts a PVC in the backup — the union of the PVCs carrying `blueprint-ai/datastage-engine=true` (so **user volumes are covered**, and the flushed set cannot drift from the snapshotted set) and anything matching `*-ds-storage-pvc` / `*-px-storage-pvc` (a safety net if the label was forgotten, and it picks up extra PXRuntime instances with no configuration). Warns if no PVC carries the label, and names any labelled PVC that no running pod mounts, since that one will be snapshotted unflushed. Warns if any job run is in flight. Takes IBM's backup lock (5.4) in the `flows` pod, and fails if no `flows` pod is running. Finally runs `sync` in each of those pods — **last**, so nothing dirties the page cache afterwards. |
-| `backupPosthook` | After the volume snapshots are ready | Releases IBM's backup lock (`rm -f /ds-storage/PXRuntime/Projects/.backup_lock` in the `flows` pod), as IBM's 5.4 `ckpt-cm` post-hook does. Idempotent. If no `flows` pod is running it only warns: the `flows` service deletes a lock older than 4 hours by itself. |
-| `restorePosthook` | After Kasten restores the volumes | Sets `spec.ignoreForMaintenance: false` on the `DataStage` CR and every `PXRuntime` CR (idempotent), then waits up to 1800 s for all of them to report `dsStatus == Completed`, so the restore action does not report success while the engine is still assembling itself. Then deletes the backup lock that the restored `/ds-storage` contains (the snapshot was taken while it existed). Prints the recompile reminder. |
-
-The `backupPosthook` undoes only the lock: the backup path quiesces nothing else. On 5.2.2, where
-IBM's backup hooks were empty, the blueprint had no `backupPosthook` at all.
+| `backupPrehook` | Before Kasten snapshots that workload's volumes | Finds the running `BackupAction` (its UID identifies the backup; more than one running backup of the namespace fails the hook). Then tries to create `datastage-backup-lock`. **Leader** (the creation succeeded, or it took over a dead or failed lock): waits for the `DataStage` CR and every `PXRuntime` CR to report `dsStatus == Completed`; sets `ignoreForMaintenance: true` on all of them (IBM's `enable-maint`) and waits for `InMaintenance`, 1800 s; finds every running pod mounting a PVC labelled `blueprint-ai/datastage-engine=true` or named `*-ds-storage-pvc` / `*-px-storage-pvc`, and warns about labelled PVCs nobody mounts, pods outside DataStage mounting an engine PVC, and job runs in flight; runs `sync` in each of those pods; marks the lock `ready` with the time. On any failure: marks the lock `failed` and leaves maintenance. **Follower**: waits for the leader of this backup; exits 0 when the lock is `ready` and DataStage is in maintenance, or when it is `released` and every labelled PVC already has a snapshot taken after `readyAt`; fails if the leader it waited for failed |
+| `backupPosthook` | After that workload's snapshots | Checks this backup's snapshot of every labelled PVC (`kasten_io_manifestid` = the `BackupAction` UID). A snapshot older than `readyAt`: marks the lock `failed`, leaves maintenance, **fails the backup**. Some not taken yet: exits 0 without waiting — a later posthook releases. All taken and ready: marks the lock `released`, sets `ignoreForMaintenance: false` (IBM's `disable-maint`) and waits up to 1800 s for `Completed`. If the prehook never completed (lock `quiescing` or `failed`), leaves maintenance and fails |
+| `restorePosthook` | After Kasten restores the volumes and the `runtime` Deployment | Sets `ignoreForMaintenance: false` on the `DataStage` CR and every `PXRuntime` CR (idempotent), then waits up to 1800 s for all of them to report `dsStatus == Completed`, so the restore action does not report success while the engine is still assembling itself. Prints the recompile reminder |
 
 ---
 
@@ -611,8 +578,8 @@ workloads down and waits for every mount to be released:
        datastage-ibm-datastage-ds-storage-pvc
        ds-px-default-ibm-datastage-px-storage-pvc
 5/6  restore point
-       scheduled-848cw found
-6/6  scaling down the DataStage workloads (IBM's br-cm managed-resources)
+       scheduled-t5f5b found
+6/6  scaling down the DataStage workloads
        no pod mounts the labelled PVCs
 
 READY — launch the RestoreAction now (Step 2).
@@ -636,10 +603,11 @@ What each check is for:
 | job runs in flight | A job that keeps writing to volumes about to be replaced. `backupPrehook` only warns about this; at restore time it matters more |
 | the PVC label | A `RestoreAction` whose filter matches no PVC **succeeds and restores nothing** — the same silent-success trap described above for backups |
 | the restore point exists | Catches a typo *before* the operator is parked, not after |
-| the scale-down, and no pod mounting a labelled PVC | The three selectors are IBM's `br-cm` `managed-resources`. If a pod outside them still mounts a labelled PVC after 600 s — typically a user volume shared with another service — the script names it and stops, because the `RestoreAction` would otherwise fail on `Failed to delete PVC` |
+| the scale-down, and no pod mounting a labelled PVC | The three selectors are IBM's `br-cm` `managed-resources` on 5.4 (the list is empty on 4.8.9, but the PVCs still cannot be replaced while a pod mounts them). If a pod outside them still mounts a labelled PVC after 600 s — typically a user volume shared with another service — the script names it and stops, because the `RestoreAction` would otherwise fail on `Failed to delete PVC` |
 
-> **What to expect during the restore.** The script prints this too. Measured on 2026-10-15
-> (5.2.2) and 2026-10-16 (5.4.7):
+> **What to expect during the restore.** The script prints this too. Measured on 2026-10-23
+> (4.8.9): `prepare-restore.sh` 59 s, then the `RestoreAction` `Complete` in 7 min 21 s. Measured on
+> 2026-10-15 (5.2.2) and 2026-10-16 (5.4.7):
 >
 > 1. **The volume restore is quick:** about 1.5 minutes from `RestoreAction` start to ~92%. The
 >    PVCs are already free, so Kasten does not wait for pods to release them.
@@ -741,7 +709,7 @@ export CPDCTL_ENABLE_DSJOB=true
 
 | Scenario | What to do |
 |---|---|
-| **A — a project or a flow was lost.** Engine is healthy | This blueprint is not involved. Restore the project with [cp4d-example](../../cp4d-example/5.4/), then recompile if `list-flows --with-compiled` says so |
+| **A — a project or a flow was lost.** Engine is healthy | This blueprint is not involved. Restore the project with [cp4d-example](../../cp4d-example/4.8/), then recompile if `list-flows --with-compiled` says so |
 | **B — engine storage damaged, project assets intact** | Steps 1–4 above |
 | **C — rebuild from nothing** | 1. cluster + CP4D control plane + `ccs` (fresh install or `cpdbr`) → 2. **install DataStage at the same version** → 3. **engine state first**, Steps 1–3 above (prepare, restore, verify — recompiling comes at 5) → 4. **project assets second**, via cp4d-example → 5. recompile, re-run jobs to rebuild Data Sets → 6. verify connections against the external sources; if you edit one (a new hostname, say), **recompile again** — a job runs with the copy of the connection compiled onto `/ds-storage`, not with the project's connection ([tutorial §4.7](minimal-tutorial.md#47-the-job-runs-with-a-copy-of-the-connection-not-with-the-connection)) |
 
@@ -830,11 +798,14 @@ onto `/ds-storage`. A flow that is restored but never recompiled cannot run.
 ### 3. Engine-state artifacts — what this blueprint protects
 
 Nothing above lives on the engine volumes except by side effect, so add the three artefacts a real
-deployment would have, and record their checksums so a restore can be checked:
+deployment would have, and record their checksums so a restore can be checked. On 4.8.9 the install
+does not create `/ds-storage/user-lib`, so the fixture creates it; anything under `/ds-storage` is in
+the backup wherever you put it.
 
 ```bash
 POD=$(kubectl get pods -n cpd -o name | grep px-runtime | head -1)
 kubectl exec -n cpd ${POD#pod/} -- bash -c "
+  mkdir -p /ds-storage/user-lib
   printf 'KASTEN-FIXTURE custom parallel routine library v1\n' > /ds-storage/user-lib/libkasten_fixture.so
   printf '[kasten_fixture_dsn]\nDriver=/ds-storage/connectors/odbc/drivers/libfixture.so\n' > /ds-storage/connectors/odbc/config/odbc.ini.fixture
   printf 'CLASSPATH=/ds-storage/user-lib/kasten-fixture.jar\n' > /px-storage/config/jdbc/isjdbc.config.fixture
@@ -861,7 +832,50 @@ kubectl exec -n cpd ${POD#pod/} -- find /ds-storage/PXRuntime/Projects/$PID -max
 
 ## Validation
 
-### 2026-10-16 — after upgrading CP4D from 5.2.2 to 5.4.0 Patch 7
+### 2026-10-23 — CP4D 4.8.9, every DataStage workload bound, with the lock
+
+Kasten 9.0.8 / OpenShift 4.18.56 / CP4D 4.8.9 / DataStage 4.8.9, storage `nfs-csi`. Tool image built
+in the cluster from [images/kasten-tools](../../images/kasten-tools/) with `KASTEN_VERSION=9.0.8`
+(see the tool image note under [Versions](#versions)).
+
+| Step | Result |
+|---|---|
+| Example data | Project `datastage-demo`, flow compiled, job run (`5 records exported`); the three engine-side fixture files written and their md5 recorded, with `customers.txt` and the two Data Set data files |
+| `backupPrehook` × 10 through a `RunAction` | One leader (`px-compute`): waited for `Completed`, entered maintenance, flushed 8 pods, lock `ready` at 11:57:31. The others: `FOLLOWER` or "already snapshotted after the quiesce; nothing to do" |
+| Snapshot timing | `ds-storage` and `px-storage` snapshotted at **11:57:37**, 6 s after the quiesce. Before the lock, the same policy with one bound workload snapshotted them in the same second the prehook started |
+| `backupPosthook` × 10 | The posthooks running after the engine snapshots released maintenance and marked the lock `released`; the others exited at once. DataStage back to `Completed` 5 min later; backup `Complete` in 7 min 25 s |
+| Snapshot scope | 4 volume snapshots: `ds-storage`, `px-storage` (labelled), `ds-migration`, `conn-home-pvc` (brought in by the included workloads) |
+| Destruction | The three fixture files, `customers.txt` and both Data Set data files deleted; `view-dataset` failing |
+| `prepare-restore.sh` | All 6 steps passed in 59 s |
+| Restore through a `RestoreAction` | `Complete` in **7 min 21 s**: volumes after 74 s, then `restorePosthook` left maintenance and waited for `Completed` |
+| PVCs replaced | Only `ds-storage` and `px-storage` got new UIDs. `ds-migration` and `conn-home-pvc` were not touched |
+| Data check | All six md5 checksums identical to the baseline, including the original Data Set file ids |
+| Functional check | `view-dataset` reads the five rows again; the flow recompiles and the job runs (`Current Job Status: Completed`) |
+
+**The lock, tested on a minimal namespace first** (one RWX PVC, two bound Deployments, a 60 s stand-in
+quiesce):
+
+| Case | Result |
+|---|---|
+| Normal backup, 4 runs | Snapshot after the quiesce every time; maintenance released |
+| The leader fails (injected), with Kasten's automatic retries | Followers failed with their leader instead of taking over; every attempt cleaned up; the next backup succeeded |
+| A dead lock from another backup, with maintenance left on | Taken over; backup succeeded |
+| Backup cancelled during the quiesce | Lock left in place as expected; the next backup took it over and succeeded |
+| A bound workload filtered out of the policy | No snapshot of the PVC at all (point 1 of the filter section); the backup **failed** instead of reporting `Complete` |
+
+**Two failures on the way, both now handled:**
+
+- The OpenShift API server rolled out a new revision during two test backups (a rotated
+  `kubelet-serving-ca`; routine on a young cluster, and it happens in production too). Each API
+  server restart drops every hook's connection (`http2: server sent GOAWAY`), and Kasten retries the
+  whole job. A retried prehook used to quiesce again after the engine PVCs were already captured,
+  and its posthook then failed a good backup. The lock now records the backup and checks its
+  snapshots, so a late prehook does nothing.
+- With 10 workloads, Kasten runs prehook → snapshot → posthook in waves of about five. Posthooks
+  that waited for the other engine snapshots could hold the slots a later wave needed. Posthooks no
+  longer wait.
+
+### 2026-10-16 — CP4D 5.4.0 Patch 7 (5.4 folder, kept for reference)
 
 Kasten 9.0.7 / OpenShift 4.21.30 / CP4D 5.4.0 Patch 7 / DataStage 5.4.7, storage
 `ocs-storagecluster-cephfs`, tool image `kasten-tools:9.0.7`. Same policy and restore procedure as
@@ -880,7 +894,7 @@ the 2026-10-15 run below; the blueprint gained IBM's 5.4 backup lock (`backupPos
 | Data check | All four md5 checksums identical to the baseline, the original Data Set file ids back, both marker files gone, no `.backup_lock` left on the restored volume |
 | Functional check | `view-dataset` reads the five rows again; the flow compiles and the job runs (`Current Job Status: Completed`) |
 
-### 2026-10-15 — current policy and restore procedure, on CP4D 5.2.2
+### 2026-10-15 — CP4D 5.2.2 (5.2 folder, kept for reference)
 
 Kasten 9.0.7 / OpenShift 4.21.30 / CP4D 5.2.2 / DataStage 5.2.2, storage
 `ocs-storagecluster-cephfs`. Policy filtered to the labelled PVCs and the `runtime` Deployment;
@@ -938,6 +952,9 @@ kubectl delete blueprint datastage-engine-bp -n kasten-io
 # restore-point content for this app
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=cpd
 
+# the lock record (see "Why every DataStage workload is bound")
+kubectl delete configmap datastage-backup-lock -n cpd --ignore-not-found
+
 # the PVC label
 kubectl label pvc -n cpd datastage-ibm-datastage-ds-storage-pvc \
   ds-px-default-ibm-datastage-px-storage-pvc blueprint-ai/datastage-engine-
@@ -967,3 +984,9 @@ DataStage itself is removed with `cpd-cli manage delete-cr` then `delete-olm`
 > already have. I know nothing about DataStage except that it is an ETL, I do not know how to
 > install it, and I have no idea how backup and restore of DataStage works. Study the persistence
 > model carefully before deciding anything.
+
+The 4.8 folder came from a later request:
+
+> Many customers are on different versions: 5.2 and 5.4 today, and one is on 4.8. Organize the
+> blueprints by version folder, then create an OpenShift cluster on Azure, install CP4D 4.8 and build
+> the blueprints for this version.

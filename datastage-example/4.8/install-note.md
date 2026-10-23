@@ -1,5 +1,10 @@
 # DataStage install note — the environment this blueprint was validated against
 
+> **Copied from the 5.4 folder.** The measurements in this file were taken on DataStage 5.4.7. On
+> 4.8.9 the volume layout, the engine paths and the process types are the same; IBM's backup
+> ConfigMaps are not (no online-backup specification), and `/ds-storage/user-lib` is not created by
+> the install. See [README.md](README.md) for what was measured on 4.8.9.
+
 DataStage Enterprise 5.2.2 added to an existing CP4D / IBM Software Hub 5.2.2 instance.
 
 > ## ⚠️ This is not installation documentation — use IBM's
@@ -400,7 +405,7 @@ image pull secret `ibm-entitlement-key` built from the entitlement key, in the o
 | | 5.2.2 | 5.4.7 |
 |---|---|---|
 | How the DataStage operator is installed | OLM, CSV `ibm-cpd-datastage-operator.v8.2.0` | **Helm**, chart `datastage-ent` 12.0.7, no CSV (true of every service on 5.4) |
-| Online backup hooks (`ckpt-cm`) | empty | `touch` / `rm` of `/ds-storage/PXRuntime/Projects/.backup_lock` in the `flows` pod — see [README → The backup lock](README.md#the-backup-lock--new-in-54) |
+| Online backup hooks (`ckpt-cm`) | empty | `touch` / `rm` of `/ds-storage/PXRuntime/Projects/.backup_lock` in the `flows` pod — see [5.4 README → The backup lock](../5.4/README.md#the-backup-lock--new-in-54) |
 | `PXRuntime` selection in every hook | any `PXRuntime` | `labels: icpdsupport/addOnId=datastage` |
 | Restore plan (`br-cm`, `ckpt-cm`) | ConfigMaps + CRs | adds `datastage-operator-resources` (the operator's Deployments, Services, RBAC) |
 | Engine PVCs, their names, mounts and our label | — | unchanged; the upgrade did not touch the data on them |

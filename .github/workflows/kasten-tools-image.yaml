@@ -8,9 +8,19 @@ name: kasten-tools image
 # That makes the version list self-maintaining: a new blueprint referencing
 # kasten-tools:8.6.0 causes 8.6.0 to be built on merge, with no change to this file.
 # Consequently the trigger must also watch the blueprint YAML, not just the image dir.
+#
+# A version is only rebuilt when it is not published yet or when the Dockerfile changed
+# since it was published (see the "Check published image" step). Everything else is
+# skipped, so published digests stay stable. `force_rebuild` rebuilds them all, for
+# example to pick up a fixed base image.
 
 on:
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: "Rebuild every version, even when the published image is up to date"
+        type: boolean
+        default: false
   pull_request:
     paths:
       - "images/kasten-tools/**"
@@ -75,16 +85,53 @@ jobs:
       - name: Check out code
         uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
 
+      - name: Check published image
+        id: check
+        env:
+          REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.kasten_version }}
+          FORCE: ${{ inputs.force_rebuild == true }}
+        run: |
+          set -euo pipefail
+
+          # Hash of what the build actually uses. The ARG KASTEN_VERSION default is left
+          # out: it only says which version is `latest`, and every build passes the
+          # version explicitly, so bumping it must not rebuild every tag.
+          hash=$(grep -v '^ARG KASTEN_VERSION=' images/kasten-tools/Dockerfile | sha256sum | cut -c1-64)
+          echo "hash=${hash}" >> "$GITHUB_OUTPUT"
+
+          # Empty when the tag does not exist or was published before this label existed.
+          published=$(docker buildx imagetools inspect "$REF" \
+                        --format '{{ index (index .Image "linux/amd64").Config.Labels "blueprint-ai.dockerfile-hash" }}' \
+                        2>/dev/null || true)
+
+          if [ "$FORCE" = "true" ]; then
+            build=true;  reason="force_rebuild requested"
+          elif [ -z "$published" ]; then
+            build=true;  reason="not published, or published without a Dockerfile hash"
+          elif [ "$published" != "$hash" ]; then
+            build=true;  reason="Dockerfile changed since it was published"
+          else
+            build=false; reason="published image is up to date"
+          fi
+          echo "build=${build}" >> "$GITHUB_OUTPUT"
+          echo "${REF}: build=${build} (${reason})"
+
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81 # v5.5.1
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # The version tag is produced on every run, so a manual run from a branch can
+          # publish a version a blueprint needs before its PR is merged. If the branch
+          # changed the Dockerfile, that run overwrites every tag with it; the next push to
+          # main rebuilds them from the reviewed one. `latest` stays main-only. Pull
+          # requests never push.
           tags: |
-            type=raw,value=${{ matrix.kasten_version }},enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=raw,value=${{ matrix.kasten_version }}
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && matrix.kasten_version == needs.discover-versions.outputs.default_version }}
 
       - name: Set up QEMU
+        if: steps.check.outputs.build == 'true'
         uses: docker/setup-qemu-action@68827325e0b33c7199eb31dd4e31fbe9023e06e3 # v3.0.0
 
       - name: Set up Docker Buildx
@@ -99,6 +146,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
+        if: steps.check.outputs.build == 'true'
         uses: docker/build-push-action@2cdde995de11925a030ce8070c3d77a52ffcf1c0 # v5.3.0
         with:
           context: images/kasten-tools
@@ -107,4 +155,18 @@ jobs:
             KASTEN_VERSION=${{ matrix.kasten_version }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            blueprint-ai.dockerfile-hash=${{ steps.check.outputs.hash }}
+
+      # A skipped version keeps its image, but `latest` must still follow the Dockerfile
+      # default when that default moves to a version that is already published.
+      - name: Point latest at the skipped default version
+        if: >-
+          steps.check.outputs.build == 'false' &&
+          github.event_name != 'pull_request' &&
+          contains(steps.meta.outputs.tags, ':latest')
+        run: |
+          docker buildx imagetools create \
+            -t "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
+               "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.kasten_version }}"

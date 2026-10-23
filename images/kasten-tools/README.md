@@ -32,6 +32,22 @@ multi-arch image (`linux/amd64`, `linux/arm64`) per version.
 
 That makes the tag list **self-maintaining**: reference `kasten-tools:8.6.2` in a new blueprint and
 the workflow builds and publishes `8.6.2` on merge, with no change to the workflow or this file.
+
+To use a new version **before** the merge (for example, to test the blueprint on a cluster), run
+the workflow by hand on your branch: **Actions → kasten-tools image → Run workflow**, then pick the
+branch. It publishes the same `<version>` tags as `main`, built from that branch's Dockerfile.
+`latest` is only published from `main`.
+
+A version is rebuilt only when it is **not published yet**, or when the **Dockerfile changed**
+since it was published. Each image carries a `blueprint-ai.dockerfile-hash` label, and the
+workflow compares it with the current Dockerfile (without the `ARG KASTEN_VERSION` default
+line, so changing the default does not rebuild every tag). All other versions are skipped
+and keep their digest. Tick **force_rebuild** on a manual run to rebuild every version anyway,
+for example to pick up a fixed `kanister-tools` base image or newer `jq` packages.
+
+> **Be careful with a branch that changes the Dockerfile.** A manual run from that branch
+> rebuilds and overwrites **every** version tag with the unreviewed Dockerfile. The next push
+> to `main` rebuilds them from the reviewed one.
 Previously published tags stay available, so blueprints pinned to an older Kasten version keep
 working.
 

@@ -74,7 +74,7 @@ Detected on the cluster where this blueprint was tested (2026-10-22).
 | Cloud Pak for Data | 4.8.9 (`ibmcpd-cr` 4.8.9, Zen 5.1.15, Watson Studio `ws` 8.9.0, Common Core Services 8.9.0) |
 | cpdctl | 1.10.34 |
 | kubectl (in the keeper image) | 1.34.9 |
-| Keeper image | `ghcr.io/kastenhq/blueprint-ai/cp4d-backup:1.10.34-1` (built from the [5.4 folder](../5.4/images/cp4d-backup/)) |
+| Keeper image | `ghcr.io/kastenhq/blueprint-ai/cp4d-backup:4.8-r1` (built from [images/cp4d-backup/](images/cp4d-backup/); the same image as the earlier tag `1.10.34-1`, which was built from the identical 5.4 folder) |
 
 > **CP4D 4.8 is out of IBM support** (end of support 31 July 2025). OpenShift 4.17 and 4.18 are
 > supported only from the 4.8.9 refresh.
@@ -94,11 +94,11 @@ helm ls -n kasten-io                 # Helm
 |---|---|
 | [blueprint.yaml](blueprint.yaml) | The action blueprint (`backupPrehook`) |
 | [restore.sh](restore.sh) | Host-run restore: recreate a project from a restored PVC |
-| [../5.4/images/cp4d-backup/Dockerfile](../5.4/images/cp4d-backup/Dockerfile) | Keeper image (cpdctl + kubectl + jq + unzip) |
-| [../5.4/images/cp4d-backup/orchestrate.sh](../5.4/images/cp4d-backup/orchestrate.sh) | Backup orchestrator (enumerate → export pods → prune) |
-| [../5.4/images/cp4d-backup/export-project.sh](../5.4/images/cp4d-backup/export-project.sh) | Per-project export → unzip atomically to PVC |
-| [../5.4/images/cp4d-backup/import-project.sh](../5.4/images/cp4d-backup/import-project.sh) | Import a bundle from a restored PVC |
-| [../5.4/images/cp4d-backup/cpdctl-login.sh](../5.4/images/cp4d-backup/cpdctl-login.sh) | Headless cpdctl auth (env creds or cross-ns secret) |
+| [images/cp4d-backup/Dockerfile](images/cp4d-backup/Dockerfile) | Keeper image (cpdctl + kubectl + jq + unzip) |
+| [images/cp4d-backup/orchestrate.sh](images/cp4d-backup/orchestrate.sh) | Backup orchestrator (enumerate → export pods → prune) |
+| [images/cp4d-backup/export-project.sh](images/cp4d-backup/export-project.sh) | Per-project export → unzip atomically to PVC |
+| [images/cp4d-backup/import-project.sh](images/cp4d-backup/import-project.sh) | Import a bundle from a restored PVC |
+| [images/cp4d-backup/cpdctl-login.sh](images/cp4d-backup/cpdctl-login.sh) | Headless cpdctl auth (env creds or cross-ns secret) |
 | [DESIGN.md](../DESIGN.md) | The rationale: why the API path, pattern mapping, what export captures |
 | [DESIGN.pptx](../DESIGN.pptx) | The same rationale as a deck — one slide per DESIGN.md section, full section text in the speaker notes (open with PowerPoint; Keynote refuses the import) |
 | [tools/build-design-deck.py](../tools/build-design-deck.py) | Regenerates `DESIGN.pptx` from `DESIGN.md` (`pip install python-pptx`) |
@@ -110,13 +110,13 @@ helm ls -n kasten-io                 # Helm
 ### 1. Build the keeper image
 
 The blueprint and restore both use one self-contained image (Dockerfile committed at
-[../5.4/images/cp4d-backup/](../5.4/images/cp4d-backup/), shared with 5.4): Debian slim + `cpdctl` + `kubectl` + `jq` + `unzip`,
+[images/cp4d-backup/](images/cp4d-backup/)): Debian slim + `cpdctl` + `kubectl` + `jq` + `unzip`,
 with the four orchestration scripts baked in. Runs as an arbitrary (OpenShift-assigned) UID; the
 cpdctl config is rendered to a tmpfs path at runtime and never persisted.
 
 ```bash
-cd ../5.4/images/cp4d-backup
-docker buildx build --platform linux/amd64 -t <your-registry>/cp4d-backup:1.10.34-1 --push .
+cd images/cp4d-backup
+docker buildx build --platform linux/amd64 -t <your-registry>/cp4d-backup:4.8-r1 --push .
 ```
 
 > Use an **immutable tag** (or `imagePullPolicy: Always`, which the pod specs already set). A reused
@@ -166,7 +166,7 @@ the backed-up namespace, so it is never captured in a restore point.
 > These are two separate authorization systems: a **role** bundles *platform* permissions (what you
 > may do to the cluster), while **project membership** is a per-project entry governing access to
 > that project's *data*. That third row is what lets the blueprint bridge them —
-> [orchestrate.sh](../5.4/images/cp4d-backup/orchestrate.sh) enumerates every project and **enrols itself
+> [orchestrate.sh](images/cp4d-backup/orchestrate.sh) enumerates every project and **enrols itself
 > as editor on any it is not already a member of**, before exporting anything. A project nobody
 > granted it access to is repaired rather than silently skipped, and if enrolment fails the whole
 > backup fails loudly (before any data moves) rather than quietly omitting that project.
@@ -177,7 +177,7 @@ the backed-up namespace, so it is never captured in a restore point.
 > stay untouched, this blueprint is not currently able to exclude them.
 
 **The keeper authenticates with the API key alone — never a password.**
-[cpdctl-login.sh](../5.4/images/cp4d-backup/cpdctl-login.sh) runs
+[cpdctl-login.sh](images/cp4d-backup/cpdctl-login.sh) runs
 `cpdctl config user set svc --username … --apikey-stdin` (the key is piped in, so it never
 appears on a command line or in the process table), and the Secret holds only `url`, `username`,
 `apikey` and `uid`. The `cpadmin` password is used once, on your workstation, to obtain the key; it
@@ -294,7 +294,7 @@ unset SVC_PW TOKEN APIKEY
 > the API steps above are what was run.
 
 Verify the Secret is usable before deploying anything else. This mirrors exactly what
-[cpdctl-login.sh](../5.4/images/cp4d-backup/cpdctl-login.sh) does inside the keeper — it reads the same
+[cpdctl-login.sh](images/cp4d-backup/cpdctl-login.sh) does inside the keeper — it reads the same
 three keys (`url`, `username`, `apikey`) and runs the same two `cpdctl config` commands:
 
 ```bash
@@ -325,7 +325,7 @@ kubectl get secret cp4d-backup-cpdctl-creds -n cpd -o jsonpath='{.data.apikey}' 
 ### Coverage is handled by the blueprint
 
 You do **not** need to add `cpadmin` to each project by hand.
-[orchestrate.sh](../5.4/images/cp4d-backup/orchestrate.sh) does it on every run: it enumerates all
+[orchestrate.sh](images/cp4d-backup/orchestrate.sh) does it on every run: it enumerates all
 projects, lists the ones it is already an editor on, and enrols itself on the difference before
 launching any export pod. Validated end-to-end on 5.2 on 2026-08-07 — a keeper that was an editor
 on **0** projects enrolled itself on a freshly created project and exported it (145 KB bundle).

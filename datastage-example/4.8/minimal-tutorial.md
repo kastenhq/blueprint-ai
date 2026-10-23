@@ -1,5 +1,10 @@
 # DataStage in one sitting — enough to design a backup for it
 
+> **Copied from the 5.4 folder.** The measurements in this file were taken on DataStage 5.4.7. On
+> 4.8.9 the volume layout, the engine paths and the process types are the same; IBM's backup
+> ConfigMaps are not (no online-backup specification), and `/ds-storage/user-lib` is not created by
+> the install. See [README.md](README.md) for what was measured on 4.8.9.
+
 > ## ⚠️ This is not DataStage documentation — use IBM's
 >
 > **To learn or use DataStage, go to IBM's official documentation, not this file.**
@@ -434,7 +439,7 @@ DataStage backup, the restored tables and the restored jobs do not describe the 
 simple fix after restoring both is to re-run the jobs that write derived tables.
 
 **The connection belongs to the CP4D project backup.** A connection is a project asset, so
-[cp4d-example](../../cp4d-example/5.4/) protects it, with the flows and jobs. Measured on this project,
+[cp4d-example](../../cp4d-example/4.8/) protects it, with the flows and jobs. Measured on this project,
 `cpdctl asset export start --assets-all-assets` exported one each of `connection`,
 `data_intg_flow`, `job`, `data_intg_data_set`, `data_intg_project_settings` and `environment`, and
 the connection was in it **twice**:
