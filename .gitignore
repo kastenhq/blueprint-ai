@@ -10,3 +10,7 @@ features.conf
 # first. See ppt-tools/README.md. Only local scratch decks are ignored.
 *.local.pptx
 ~$*.pptx
+
+# Python bytecode
+__pycache__/
+*.pyc

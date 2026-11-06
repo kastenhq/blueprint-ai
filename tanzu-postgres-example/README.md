@@ -304,7 +304,7 @@ Recorded on the restore point by `backupPrehook`. Only the first two are functio
 |---|---|---|
 | `backupName` | **Yes** | `delete` needs it to find the `PostgresBackup` CR and set `spec.expire` |
 | `namespace` | **Yes** | `delete` runs as a `KubeTask` in `kasten-io` and has no other way to know which namespace the retired restore point belonged to |
-| `stanzaName` | No | Needed at restore time for `pitr.sourceBackupLocation.stanzaName`. Recorded because once the instance is deleted the stanza name is awkward to recover |
+| `stanzaName` | No | Needed at restore time for `pitr.sourceBackupLocation.stanzaName`. Recorded because once the instance is deleted the stanza name is awkward to recover. After the loss of the namespace or the cluster it is the only easy source: the restored `PostgresBackup` objects have no `status`. The dashboard displays it at the bottom of the restore point card |
 | `restoreLabel` | No | Identifies which pgBackRest backup set the restore point matches; can be passed as `pitr.sourceBackupLocation.set` |
 | `instance` | No | Redundant — derivable from `backupName` by stripping `-kasten-<timestamp>`. Kept only because it makes the restore point readable at a glance |
 
@@ -615,6 +615,14 @@ Get the stanza name — the blueprint records it as a restore-point artifact, an
 kubectl get postgresbackup -n $NS \
   -o custom-columns=NAME:.metadata.name,STANZA:.status.stanzaName,LABEL:.status.restoreLabel
 ```
+
+> **Disaster recovery: read the stanza from the restore point, not from `PostgresBackup`.** The
+> command above works only while the `PostgresBackup` objects still exist, as in this procedure,
+> where only the instance was deleted. If the namespace or the whole cluster was lost, Kasten
+> recreates the `PostgresBackup` objects without their `status`, because the Kubernetes API drops
+> `status` when an object is created, so `STANZA` and `LABEL` are empty. In that case use the
+> `stanzaName` output artifact that the blueprint recorded. The Kasten dashboard displays it at the
+> bottom of the restore point card, together with `restoreLabel`.
 
 ```bash
 kubectl apply -f - <<EOF
