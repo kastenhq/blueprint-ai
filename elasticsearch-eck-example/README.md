@@ -11,9 +11,9 @@
 
 ## Pattern: Database snapshot on a permanent workload PVC (Pattern 3)
 
-**Why Pattern 3 (permanent workload PVC), not Pattern 7 (temporary PVC)?**
+**Why Pattern 3 (permanent workload PVC), not Pattern 8 (temporary PVC)?**
 
-Pattern 7 (Elasticsearch native snapshot to a new temporary PVC per backup) would be preferred
+Pattern 8 (Elasticsearch native snapshot to a new temporary PVC per backup) would be preferred
 because Elasticsearch explicitly discourages filesystem-level PVC snapshots of its data volumes:
 <https://www.elastic.co/docs/deploy-manage/tools/snapshot-and-restore#other-backup-methods>
 

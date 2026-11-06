@@ -46,11 +46,15 @@ A blueprint attached to a high-level custom resource (for example, an EDB `Clust
 >
 > - **Permanent PVCs** pre-exist at discovery time → they are correctly snapshotted. A
 >   BlueprintBinding on the workload that owns (or mounts) the PVC is sufficient.
-> - **Temporary PVCs** (created inside `backupPrehook`) are never discovered → they are never
->   snapshotted. The only way to make a temporary PVC visible to Kasten is to create it inside a
->   **BackupAction preHook** (action hook), which runs before PVC discovery. See
->   [Invocation Mode 2 — Action Hooks](#invocation-mode-2--action-hooks) and the warning in the
->   [temporary PVC patterns](#temporary-pvc-patterns--action-hook-required) section.
+> - **Temporary PVCs** (created inside `backupPrehook`) are never discovered → by default they
+>   are never snapshotted. Two ways make a temporary PVC visible to Kasten:
+>   - **Late capture** (Kasten `9.0.10` or later, feature flag `features.lateCapture=true`):
+>     `backupPrehook` *declares* the PVC in a `lateCapture` output artifact, and Kasten adds it to
+>     the snapshot set after the hook. The blueprint stays resource-bound and works with
+>     BlueprintBinding. See [Late Capture](#late-capture--hook-created-resources-in-the-restore-point).
+>   - **BackupAction preHook** (action hook), which runs before PVC discovery. Namespace context
+>     only, no BlueprintBinding. See [Invocation Mode 2 — Action Hooks](#invocation-mode-2--action-hooks)
+>     and the [action-hook patterns](#action-hook-patterns--temporary-pvc-created-before-discovery).
 >
 > **Labels and annotations added to PVCs during `backupPrehook` are not reflected in the restore
 > point.** Kasten captures the PVC spec at discovery time (before `backupPrehook` runs). When
@@ -63,7 +67,8 @@ A blueprint attached to a high-level custom resource (for example, an EDB `Clust
 > Note: Kasten also snapshots **orphan PVCs** (PVCs not mounted by any running pod). However,
 > since there is no ownership chain to attach a blueprint to, no `backupPrehook` runs for orphan
 > PVCs through a BlueprintBinding. If backup data must be written to the PVC before the snapshot,
-> you must either use a keeper Deployment (pattern 4 below) or an action preHook. An orphan PVC
+> you must use a keeper Deployment (pattern 4 below), a staging PVC with late capture (pattern 6),
+> or an action preHook. An orphan PVC
 > with no prehook is only valid when the PVC already holds valid, up-to-date backup data that
 > does not need to be refreshed before snapshotting.
 >
@@ -118,6 +123,126 @@ blueprint is bound to the MinIO Deployment, not to the main workload CR.
 See [Pattern 5](#5-database-dump-or-snapshot-through-local-minio-keeper-pvc-mounted-by-keeper-keeper-exposes-s3-protocol) in the
 Blueprint patterns section for the full description, deployment YAML, BlueprintBinding, and phase
 skeleton.
+
+### Late Capture — Hook-Created Resources in the Restore Point
+
+> ⚠️ **Kasten `9.0.10` or later, and only with the feature flag on:**
+>
+> ```bash
+> helm upgrade k10 kasten/k10 -n kasten-io --reuse-values --set features.lateCapture=true
+> kubectl get cm k10-features -n kasten-io -o jsonpath='{.data.lateCapture}'   # must print true
+> ```
+>
+> **Without the flag, nothing fails.** Kasten logs a warning (*"Late-capture declarations present
+> but the lateCapture feature flag is not set; ignoring them"*) and continues. The staging PVC is
+> created, never snapshotted, and deleted by `backupPosthook`. The restore point is green and holds
+> no dump. Check the flag before you trust a late-capture blueprint.
+
+Late capture lets a **resource-bound** `backupPrehook` create a PVC, a ConfigMap or a custom
+resource and still have it in the restore point, although discovery ran before the resource
+existed. It replaces the BackupAction preHook for this purpose, so the blueprint keeps the
+resource context (`.StatefulSet.Name`, `.Object`, and so on) and works with BlueprintBinding.
+
+**Declaration.** Any `backupPrehook` output artifact whose name starts with `lateCapture`
+(case-sensitive) is a declaration. One artifact declares one resource; use `lateCaptureDump`,
+`lateCaptureCR`, and so on for several. `KubeOps` returns the five fields as phase outputs:
+
+```yaml
+actions:
+  backupPrehook:
+    outputArtifacts:
+      lateCapture:
+        keyValue:
+          apiVersion: "{{ .Phases.createStagingPVC.Output.apiVersion }}"  # version only: v1
+          group: "{{ .Phases.createStagingPVC.Output.group }}"            # empty for core
+          resource: "{{ .Phases.createStagingPVC.Output.resource }}"      # persistentvolumeclaims
+          name: "{{ .Phases.createStagingPVC.Output.name }}"
+          namespace: "{{ .Phases.createStagingPVC.Output.namespace }}"
+```
+
+Only `backupPrehook` artifacts count. A declaration in `backupPosthook` or `backup` is ignored,
+because it would come after the snapshots.
+
+**Where it runs in the per-resource sequence:**
+
+| Step | What happens |
+|---|---|
+| 4a | `backupPrehook` creates the resource, writes the dump, declares it |
+| 4b | **Late capture**: Kasten reads the `lateCapture*` artifacts, adds declared PVCs to the snapshot set, captures ConfigMaps and CRs as specs |
+| 4c | Volume snapshots (the workload's PVCs **and** the declared PVCs) |
+| 4d | `backupPosthook` — always runs, even if 4c failed. Must delete the staging PVC |
+| 4e | **Staging PVC check**: each declared PVC must be gone or terminating, otherwise the backup fails |
+
+**Supported resources:** PVCs, ConfigMaps, custom resources. **Not** Secrets, and not CRs that
+Kasten restores with dedicated handling (KubeVirt VMs, CDI DataVolumes, NetworkAttachmentDefinitions).
+
+**Requirements for a declared PVC** — each one fails the whole backup if not met:
+
+| Requirement | Why |
+|---|---|
+| The blueprint is bound to a resource that **owns pods** (StatefulSet, Deployment, operator CR) | A blueprint bound to a ConfigMap or Secret has no volume snapshot step. Kasten fails with *"Late capture supports PVC declarations only in workload-bound blueprints"* rather than restore an empty volume. This rules out late capture for an external database bound to a ConfigMap |
+| The blueprint has **no `backup` action** | A `backup` action replaces volume snapshots, so the PVC would never be snapshotted |
+| The PVC is **Bound** when `backupPrehook` ends | With `WaitForFirstConsumer` it binds only when a pod mounts it — the dump phase does that |
+| `Filesystem` volume mode, CSI-provisioned, CSI snapshots (no generic volume snapshot) | |
+| Same namespace as the bound workload; namespace-scoped application backup (not a VM backup) | |
+| The policy's resource filters do **not** exclude it | Check this when the policy excludes the application PVCs by label: the staging PVC must not carry that label |
+| The PVC **did not exist at discovery** | See "Leftover PVC" below |
+| `backupPosthook` **deletes** it | See "Why the PVC must be deleted" below |
+
+ConfigMaps and CRs have none of the PVC restrictions. If discovery already captured them, the
+late-captured copy replaces the discovered one, so they may stay on the cluster between backups.
+
+**Why the PVC must be deleted after each backup.** A staging PVC left on the cluster is
+discovered by the next backup and snapshotted **before** the next `backupPrehook` writes a new
+dump. The restore point would hold the old dump. Kasten enforces the deletion twice (verified in
+the `9.0.10` source, `k10/kio/exec/phases/backup/late_capture.go`):
+
+1. **After `backupPosthook` (step 4e)** — `GET` on each declared PVC name. `NotFound` or a set
+   `deletionTimestamp` passes; a PVC still present fails the backup with *"Late-captured PVC was
+   not deleted by the backupPosthook; staging PVCs must be cleaned up"*. The check is skipped when
+   an earlier hook already failed (the backup fails anyway). It only looks at **declared names**,
+   so a PVC with a generated name left behind by an earlier run is not detected — it is simply
+   snapshotted at every backup until someone deletes it.
+2. **At capture time (step 4b)** — if discovery already recorded the declared PVC in this backup
+   (the PVC existed before the hook), the backup fails with *"Late-captured PVC was snapshotted
+   before the pre-backup hook; its data in this restore point would be stale"*. The same message
+   comes from a commit-time check when the same PVC name appears twice in the snapshot set.
+
+**Leftover PVC after a crash or a cancel.** `backupPosthook` did not run, so the PVC is still
+there. **With a deterministic name, exactly one backup fails, and the next one succeeds.** Tested
+on 9.0.10 with a `Bound` leftover holding a stale file: the next backup failed with *"Late-captured
+PVC was snapshotted before the pre-backup hook; its data in this restore point would be stale"*
+(its `backupPrehook` also failed, because `KubeOps create` found the PVC). `backupPosthook` runs
+even when the backup fails, and it deleted the leftover by name, so the backup after that completed
+normally. No manual step is needed, but one scheduled backup is lost.
+
+A "delete if exists" guard at the start of `backupPrehook` does not save that backup: discovery
+has already recorded the PVC before the guard runs. Use a **deterministic name**
+(`{{ .StatefulSet.Name }}-dump`): with a generated name, `backupPosthook` deletes only the PVC of
+the current run, and the leftover is snapshotted at every backup until someone deletes it.
+
+A leftover that was never mounted (`Pending`) fails discovery instead, with *"PVC not bound"*.
+Delete it by hand.
+
+**Restore.** The restore point carries the declared PVC (with its snapshot) and the
+`lateCapture` artifact. Kasten restores the PVC like any other. `restorePosthook` lists the
+artifact in `inputArtifactNames`, mounts the PVC by `{{ .ArtifactsIn.lateCapture.KeyValue.name }}`,
+replays the dump, then **deletes the restored PVC** — otherwise the next backup fails on it.
+
+**Spec only, never status.** A late-captured CR is restored through the Kubernetes API, which
+drops `status` on create. Values that live in a CR's status (a backup ID, a stanza name) must
+also be recorded as plain output artifacts.
+
+**Incrementality.** Each backup snapshots a **new volume**. On drivers where snapshot
+incrementality follows the volume's history (EBS, for example), every local snapshot is a full
+copy of the dump. Only the export to a location profile can deduplicate, because Kopia
+deduplicates by content — and only when the changes are grouped. Measured on a 28 MB MongoDB
+dump ([mongodb-logical-late-capture-example](mongodb-logical-late-capture-example/README.md#step-6--export-deduplication)):
+1% of records **added** exported 12% of the dump; 1% **updated at random positions** exported
+100%, because the changes touched every chunk. `gzip` did not change either result. A tool that needs its previous backup on the volume (an incremental
+chain, append-only snapshot files) cannot use a staging PVC: it is empty at every backup.
+
+Reference blueprint: [mongodb-logical-late-capture-example](mongodb-logical-late-capture-example/).
 
 ### Reserved Action Names — Backup
 
@@ -205,7 +330,7 @@ make it unsuitable for production blueprints:
    bypass it and write through Kopia regardless.
 
 Avoid `backup` / `restore` actions and `kando location push` / `kando location pull` in Kasten
-blueprints. Use PVC snapshots (patterns 1–9) and let Kasten be the data mover.
+blueprints. Use PVC snapshots (patterns 1–10) and let Kasten be the data mover.
 
 Owned PVCs means the PVCs owned by the resource on which the blueprint applies.
 
@@ -216,9 +341,11 @@ The following describes the backup and restore workflow:
 - BackupAction.preHook 
 - for each resource in the namespace
   - Resource.backupPrehook 
+  - Late capture of the resources declared in `lateCapture*` artifacts (Kasten 9.0.10+, flag on)
   - Owned PVCs snapshot start OR Resource.backupHook starts if defined (one excludes the other; see the previous section)
   - Owned PVCs snapshot ready OR Resource.backupHook finish if defined (one excludes the other; see the previous section)
   - Resource.backupPosthook 
+  - Check that every late-captured PVC is deleted or terminating
 - BackupAction.onSuccess or BackupAction.onFailure
 
 ### Restore
@@ -232,6 +359,15 @@ The following describes the backup and restore workflow:
   - Resource.restoreHook
   - Resource.restorePostHook
 - RestoreAction.onSuccess or RestoreAction.onFailure
+
+> ⚠️ **Local snapshots do not survive the deletion of the application namespace.** Kasten keeps
+> the `VolumeSnapshot` of each backed-up PVC **in the application namespace**, bound to a
+> `VolumeSnapshotContent` with the `VolumeSnapshotClass` deletion policy (usually `Delete`).
+> Deleting the namespace deletes the `VolumeSnapshot`, and the CSI driver deletes the storage
+> snapshot. The restore point is still listed, and its restore fails with *"can not find snapshot
+> for snapshotID …"*. Observed on Kasten `9.0.10` with the EBS CSI driver, for an ordinary PVC and
+> for a late-captured staging PVC alike. To test a restore after the namespace is lost, **export**
+> the restore point and restore from the exported copy.
 
 
 ### Assigning Blueprint — Manual Annotation
@@ -366,7 +502,7 @@ A Kasten Action (BackupAction, RestoreAction, or ExportAction — ImportAction d
 > action hooks (and where each sits in the lifecycle) is documented in
 > [Reserved Action Names → Resource-Bound Actions and Action Hooks](https://docs.kasten.io/latest/kanister/reference/action-names#resource-bound-actions-and-action-hooks).
 > Action-hook `preHook` runs at the **namespace level, before PVC discovery** — see
-> [Phase Lifecycle → Namespace-Level Backup Phases](https://docs.kasten.io/latest/kanister/reference/phase-lifecycle#namespace-level-backup-phases) — which is precisely why it is the only place a temporary PVC can be created and still captured.
+> [Phase Lifecycle → Namespace-Level Backup Phases](https://docs.kasten.io/latest/kanister/reference/phase-lifecycle#namespace-level-backup-phases) — which is why, before Kasten 9.0.10, it was the only place a temporary PVC could be created and still captured. From 9.0.10, a resource-bound `backupPrehook` can declare it for [late capture](#late-capture--hook-created-resources-in-the-restore-point) instead.
 
 Any action name is valid for action hooks. Recommended convention:
 
@@ -410,7 +546,8 @@ The following functions are commonly used in a blueprint and how to use them in 
 | `KubeExec` | Run a command in an **existing** running container (like `kubectl exec`) |
 | `KubeTask` | Spin up a **new temporary pod** with any image to run a command — **cannot mount existing PVCs**; use `KubeOps` + `WaitV2` + `KubeExec` instead |
 | `KubeExecAll` | Run in parallel across **multiple pods/containers** |
-| `KubeOps` | Create, patch, or delete Kubernetes resources (PVCs, ConfigMaps, and so on) |
+| `KubeOps` | Create, patch, or delete Kubernetes resources (PVCs, ConfigMaps, and so on). On `create` it returns `apiVersion`, `group`, `resource`, `name`, `namespace` as phase outputs — exactly the fields a [late-capture](#late-capture--hook-created-resources-in-the-restore-point) declaration needs |
+| `PrepareData` | Start a temporary pod in the application namespace with **existing PVCs mounted** (`volumes: {<pvc>: <mountPath>}`), run one command, delete the pod. The simplest way to write a dump to, or replay it from, a staging PVC. Supports `podOverride` (security context, env from a Secret). **Always set `failOnError: true`** — the default `false` ignores the command's exit code |
 | `WaitV2` | Wait for a condition to be true on a kubernetes resource. The condition is a Go template evaluated against the **full resource object** (not just `.status`). Use `.status.<field>` notation to access status fields. Verify the correct syntax with: `kubectl get <resource> -n <ns> <name> -o go-template='<condition>'` — it should return `true` when the condition is met. Example for Elasticsearch: `{{ if and (or (eq .status.health "green") (eq .status.health "yellow")) (eq .status.phase "Ready") }}true{{ else }}false{{ end }}`. **`objectReference` format**: `apiVersion` is the version ONLY (for example, `v1`), NOT the combined `group/version`. For CRDs, provide the API group separately in the `group` field. Example for a core resource (`apps/v1 deployments`): `apiVersion: v1, group: apps`. Example for a CRD (`elasticsearch.k8s.elastic.co/v1 elasticsearches`): `apiVersion: v1, group: elasticsearch.k8s.elastic.co`. Core resources (Pods, PVCs, and so on) have no group: `apiVersion: v1` with no `group` field. |
 
 - Use `KubeExec` when you need the application's running environment (credentials, Unix sockets, and so on)
@@ -418,7 +555,35 @@ The following functions are commonly used in a blueprint and how to use them in 
 - **KubeTask namespace choice** — two distinct rules:
   - **`kubectl` operations** (patching CRs, scaling StatefulSets, managing resources across namespaces): run the KubeTask in the **`kasten-io` namespace**. The pod inherits the Kasten service account which has cluster-wide RBAC permissions. The base `gcr.io/kasten-images/kanister-tools` image does NOT include `kubectl` — you must build a custom image that adds it (see [Example Dockerfile](#example-dockerfile)).
   - **Network calls to in-cluster services** (curl to a database HTTP API, gRPC, and so on): run the KubeTask in the **application namespace** (`{{ .Object.metadata.namespace }}`). Network policies may restrict cross-namespace traffic; running in the same namespace as the target service avoids policy violations. No special RBAC is needed for network calls.
-- Use `KubeOps` to create/patch/delete Kubernetes resources (PVCs, Pods, ConfigMaps, and so on). To run a command against an existing PVC, use `KubeOps` to create a pod with the PVC pre-mounted, `WaitV2` to wait for it to be ready, and `KubeExec` to execute inside it
+- Use `KubeOps` to create/patch/delete Kubernetes resources (PVCs, Pods, ConfigMaps, and so on). To run a command against an existing PVC, use `PrepareData`, or `KubeOps` to create a pod with the PVC pre-mounted, `WaitV2` to wait for it to be ready, and `KubeExec` to execute inside it
+- **`PrepareData` and `failOnError`.** With `failOnError: false` (the default) `PrepareData` reads
+  the pod's logs and returns success **whatever the exit code** (verified in the Kanister version
+  pinned by Kasten `9.0.10`). A failed `mongodump` or `pg_dump` then leaves an empty or truncated
+  file, Kasten snapshots it, and the restore point is green. Always set `failOnError: true` and
+  start the script with `set -euo pipefail`.
+- **`PrepareData` and file ownership.** A new EBS (or similar) volume is owned by `root`. An image
+  that runs as a non-root user (Bitnami images run as `1001`) cannot write to it. Set
+  `podOverride.securityContext.fsGroup` to that user's group.
+
+  ```yaml
+  - func: PrepareData
+    name: dumpDatabase
+    args:
+      namespace: "{{ .StatefulSet.Namespace }}"
+      image: <database image that contains the dump tool>
+      volumes:
+        "{{ .Phases.createStagingPVC.Output.name }}": /backup
+      failOnError: true
+      podOverride:
+        securityContext: {runAsUser: 1001, runAsGroup: 1001, fsGroup: 1001}
+        containers:
+          - name: container        # PrepareData's container name
+            env:
+              - name: DB_PASSWORD  # from the Secret: never rendered into the pod command
+                valueFrom:
+                  secretKeyRef: {name: "{{ .StatefulSet.Name }}", key: <password-key>}
+      command: ["bash", "-c", "set -euo pipefail; <dump to /backup>; sync"]
+  ```
 ---
 
 ## Dump-Tool Image
@@ -501,23 +666,32 @@ This produces an image with: `kando`, `kubectl`, `helm`, `yq`, `jq`, `tar`, `nc`
 
 We can list the different blueprint patterns observed in the field. We use the word `dump` for a logical backup (for example, `mysqldump` or `mongodump`) and `database snapshot` for an application-aware snapshot (for example, Cassandra `nodetool snapshot` or the Elasticsearch snapshot API).
 
-The patterns are ordered so that **permanent PVC patterns come before temporary PVC patterns**.
-This ordering reflects a deliberate trade-off in favor of the **Single Responsibility Principle
-(SRP)** and **Open/Closed Principle (OCP)** of software architecture:
+The ordering follows two questions:
 
-- **Permanent PVC patterns (1–6)** work with BlueprintBinding — each workload type gets its own
-  blueprint, and adding a new workload type never requires modifying an existing blueprint.
-- **Temporary PVC patterns (7–9)** require a BackupAction preHook (action hook), because PVC
-  discovery runs before `backupPrehook` and a PVC created during `backupPrehook` is never
-  snapshotted. Action hooks are namespace-scoped: one blueprint handles all workloads in the
-  namespace, which violates SRP and OCP. See the warning block in patterns 7–9.
+1. **Does the blueprint keep the Single Responsibility Principle (SRP) and the Open/Closed
+   Principle (OCP)?** Patterns 1–7 are resource-bound and work with BlueprintBinding: each
+   workload type has its own blueprint, and adding a workload type never modifies an existing
+   blueprint. Patterns 8–10 need a BackupAction preHook (action hook), which is namespace-scoped:
+   one blueprint handles every workload in the namespace, which violates SRP and OCP.
+2. **Does the backup tool need its previous backup on the volume?** An incremental chain or
+   append-only snapshot files need a volume that **persists between backups** (patterns 3–5). A
+   full dump or a full database snapshot does not: it can go on a **staging PVC** that exists only
+   during the backup (pattern 6, late capture), which needs no keeper and holds no storage between
+   backups.
 
-What is true for PVC is also true for Custom Resource: any Custom Resource (for instance a cnpg.io.Backup object) 
-or PVC that you create during resource.backupPrehook will not be captured in the restore point because the identification 
-of the resource to backup happens before resource.backupPrehook. 
+**Incrementality is part of the choice.** Patterns 1–2 snapshot the database volumes: every
+local snapshot and every export is incremental at block level. Patterns 3–5 with an append-only
+tool are incremental too. Every dump pattern (6–10, and 3–5 with a full dump) rewrites the
+whole dump at every backup. Only the export to a location profile can recover incrementality,
+because Kopia deduplicates by content. With a staging PVC (pattern 6) the local snapshot is also a
+full copy each time, because the volume is new at every backup. Measure the export growth (Step 6
+in [AGENTS.md](AGENTS.md#step-6--measure-export-deduplication-efficiency)) before you claim that a
+dump pattern is cheap.
 
-But if you create the Custom Resource or the PVC in backupAction.preHook then the Custom Resource or
-the PVC will be included in the restore point.
+A resource (PVC, ConfigMap, custom resource such as a `cnpg.io` `Backup`) created during a
+resource-bound `backupPrehook` is not discovered, because discovery runs first. It reaches the
+restore point only if the hook declares it for [late capture](#late-capture--hook-created-resources-in-the-restore-point)
+(Kasten 9.0.10+), or if it is created in a BackupAction preHook instead.
 
 
 
@@ -844,25 +1018,48 @@ actions:
               # run the workload-specific S3 restore command
 ```
 
-### 6. Create Logical Dump or Database Snapshot on PVC Already Used by Database
+### 6. Logical Dump or Full Database Snapshot on a Staging PVC (Late Capture)
+
+> ⚠️ Kasten `9.0.10` or later with `features.lateCapture=true`. Without the flag the backup
+> succeeds and holds **no dump** — see [Late Capture](#late-capture--hook-created-resources-in-the-restore-point).
+
+- **Principle**: `backupPrehook` creates a staging PVC with `KubeOps`, writes a full dump (or a
+  full database snapshot) to it with `PrepareData`, runs `sync`, and declares the PVC in a
+  `lateCapture` output artifact. Kasten snapshots it with the other PVCs. `backupPosthook` deletes
+  it. On restore, Kasten restores the PVC, and `restorePosthook` replays the dump and deletes the PVC.
+- **Example**: [mongodb-logical-late-capture-example](./mongodb-logical-late-capture-example/)
+- **Pro**: No keeper Deployment, no change to the workload, no storage used between backups.
+  Resource-bound, so BlueprintBinding works and several workload types can share a namespace.
+  A dump allows a granular restore (one database, one collection). Kasten remains the data mover
+  and deletes the snapshot when the restore point expires — no `delete` action.
+- **Cons**: No incrementality in the local snapshot (the volume is new each time); only the
+  export deduplicates. Cannot hold an incremental chain. A PVC left by a crashed or cancelled
+  backup fails the next backup until someone deletes it. Needs a blueprint bound to a resource
+  that owns pods, so not an external database bound to a ConfigMap. Needs Kasten 9.0.10+.
+- **BlueprintBinding**: Yes — attach to the workload.
+- **Filter PVC**: Yes — exclude the database PVCs and keep only the staging PVC. The filter must
+  not match the staging PVC: late capture fails the backup if the policy excludes a declared PVC.
+
+### 7. Create Logical Dump or Database Snapshot on PVC Already Used by Database
 
 - **Principle**: When no extra PVC is acceptable and the dump can safely coexist on the database volumes without exhausting storage.
 - **Example**: no example
 - **Pro**: No change of the workload configuration, no creation of extra storage.
-- **Cons**: This is dangerous for the database storage and putting the data on an extra PVC should always be preferred when possible.
+- **Cons**: This is dangerous for the database storage and putting the data on an extra PVC should always be preferred when possible. With Kasten 9.0.10+, pattern 6 almost always replaces it.
 - **BlueprintBinding**: Yes — attach to the workload CR.
 - **Filter PVC**: No — you must take all the database PVCs.
 
 ---
 
-### Temporary PVC Patterns — Action Hook Required
+### Action-Hook Patterns — Temporary PVC Created Before Discovery
 
-> ⚠️ **Patterns 7, 8, and 9 create a PVC during action `preHook` (hence before the discovery of the namespace). Because Kasten's PVC discovery
-> runs before `backupPrehook`, this PVC will never be included in the restore point when invoked
-> through aBlueprintBinding resource hook.**
+> ⚠️ **Patterns 8, 9, and 10 create a PVC during the action `preHook`, which runs before the
+> discovery of the namespace.** Before Kasten 9.0.10 this was the only way to capture a PVC
+> created for the backup. **With Kasten 9.0.10+ and late capture, use pattern 6 instead**, except
+> for an external database (pattern 10), where no workload in the cluster owns pods for the
+> blueprint to bind to.
 >
-> The **only** supported approach for these patterns is a **BackupAction preHook** (action hook),
-> which runs before PVC discovery. This comes with significant architectural constraints:
+> A **BackupAction preHook** (action hook) comes with significant architectural constraints:
 >
 > - **Context is namespace-only**: `{{ .Namespace.Name }}` is the only available template
 >   variable. No `.Object`, `.StatefulSet`, or any resource-level field is available. The blueprint
@@ -874,42 +1071,42 @@ actions:
 >   violating the Open/Closed Principle. To limit this impact, **deploy only one type of workload
 >   per namespace** when using these patterns.
 >
-> Only choose patterns 7–9 when patterns 1–6 are technically infeasible.
+> Only choose patterns 8–10 when patterns 1–7 are technically infeasible.
 >
 > 📖 **Official reference:** the reason the action-hook `preHook` is the only place a temporary PVC
 > survives is the discovery-before-processing ordering documented in
 > [Phase Lifecycle → Per-Resource Backup Processing](https://docs.kasten.io/latest/kanister/reference/phase-lifecycle#per-resource-backup-processing)
 > versus [Namespace-Level Backup Phases](https://docs.kasten.io/latest/kanister/reference/phase-lifecycle#namespace-level-backup-phases).
 
-### 7. Database Snapshot on Temporary PVC
+### 8. Database Snapshot on Temporary PVC (Action Hook)
 
 - **Principle**: Create a temporary PVC inside a BackupAction preHook (before PVC discovery) and write the database snapshot to it. Kasten discovers and snapshots the PVC, then the `backupPosthook` (or `onSuccess` hook) deletes the temporary PVC.
 - **Example**: no example
-- **Pro**: Database snapshot allows efficient incrementality by appending files at each snapshot.
-- **Cons**: Requires a BackupAction preHook; BlueprintBinding cannot be used. See warning above.
+- **Pro**: Captures a PVC created for the backup on Kasten versions without late capture.
+- **Cons**: The PVC is new and empty at every backup, so the snapshot tool cannot append to the previous one: this is a full snapshot each time, not an incremental one. Requires a BackupAction preHook; BlueprintBinding cannot be used. See warning above. With Kasten 9.0.10+, use pattern 6.
 - **BlueprintBinding**: No — must use BackupAction preHook.
 - **Filter PVC**: Yes — you can take only the temporary PVC.
 
-### 8. Logical Dump on Temporary PVC
+### 9. Logical Dump on Temporary PVC (Action Hook)
 
 - **Principle**: Create a temporary PVC inside a BackupAction preHook and write the logical dump to it. Kasten discovers and snapshots the PVC, then the `onSuccess` hook deletes it.
 - **Example**: [Mongoce](https://github.com/kastendevhub/enterprise-blueprint/tree/main/maximo/mongoce)
 - **Pro**: A dump enables granular restore.
-- **Cons**: No incrementality — as the dump grows over time, backup time grows too. Requires a BackupAction preHook; BlueprintBinding cannot be used. See warning above.
+- **Cons**: No incrementality — as the dump grows over time, backup time grows too. Requires a BackupAction preHook; BlueprintBinding cannot be used. See warning above. With Kasten 9.0.10+, use pattern 6.
 - **BlueprintBinding**: No — must use BackupAction preHook.
 - **Filter PVC**: Yes — you can take only the temporary PVC.
 
-### 9. Create Dump of External Database on Temporary PVC
+### 10. Create Dump of External Database on Temporary PVC (Action Hook)
 
 - **Principle**: For databases that live outside the cluster but whose logical dump can be created inside the cluster. Create a temporary PVC inside a BackupAction preHook, write the dump to it, let Kasten snapshot it, then delete it.
 - **Example**: https://github.com/prcerda/K10-SampleApps/blob/main/PostgreSQL-External/postgresql-ext-blueprint-alldbs.yaml
 - **Pro**: Includes an external database in the Kasten backup.
-- **Cons**: No incrementality. Requires a BackupAction preHook; BlueprintBinding cannot be used. See warning above.
+- **Cons**: No incrementality. Requires a BackupAction preHook; BlueprintBinding cannot be used. See warning above. Late capture (pattern 6) does not replace it: a declared PVC needs a blueprint bound to a resource that owns pods, and an external database has none in the cluster.
 - **BlueprintBinding**: No — must use BackupAction preHook.
 - **Filter PVC**: Yes — you can take only the temporary PVC.
 
 
-### 10. Trigger Dump of Managed Database
+### 11. Trigger Dump of Managed Database
 
 - **Principle**: Bind the blueprint to a Secret that provides connection information for a managed database, invoke an external API to create a backup, and store the backup identifier in the restore point alongside the Secret manifest.
 - **Example**: [RDS](https://github.com/kanisterio/blueprints/tree/main/aws-rds-postgres), [Firestore](https://github.com/michaelcourcy/kasten-firestore) or [MongoDB Atlas](https://github.com/kanisterio/blueprints/tree/main/mongodb-atlas)
@@ -917,7 +1114,7 @@ actions:
 - **Cons**: You lose control of the data mover and Kasten is no longer responsible for backup immutability. 
 - **Filter PVC**: No PVC is involved.
 
-### 11. Use Vendor Operator Data Mover to Handle Backup
+### 12. Use Vendor Operator Data Mover to Handle Backup
 
 - **Principle**: Invoke the vendor operator API to trigger a backup.
 - **Example**: [CNPG](https://github.com/michaelcourcy/kasten-cnpg), [K8ssandra Medusa](https://docs.kasten.io/latest/kanister/k8ssandra/policy/) or [Crunchy Postgres](https://docs.kasten.io/latest/kanister/pgo/logical)
@@ -925,9 +1122,9 @@ actions:
 - **Cons**: You lose control of the data mover and Kasten is no longer responsible for backup immutability, unless the vendor stores the backup in a PVC (for example, the Ansible Automation Platform operator). Often you need to add specific configuration on each resource and if you copy and paste without paying attention you can get backup collision.
 - **Filter PVC**: No PVC is involved unless the vendor creates a dedicated backup PVC.
 
-## Use Delete Action When Using Pattern 5, 10, and 11
+## Use Delete Action When Using Pattern 5, 11, and 12
 
-In patterns 5, 10 and 11, Kasten is no longer the data mover (or indirectly in pattern 5). When Kasten deletes a restore point, it
+In patterns 5, 11 and 12, Kasten is no longer the data mover (or indirectly in pattern 5). When Kasten deletes a restore point, it
 does **not** automatically clean up the external backup that was created by the blueprint (for example, an
 RDS snapshot, an Atlas backup, a CNPG `Backup` CR). To clean up the external backup, implement a
 `delete` action in the blueprint. Kasten calls it automatically when the restore point is deleted.

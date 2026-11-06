@@ -108,11 +108,11 @@ pgBackRest should write.
 
 | Considered | Why it was not chosen |
 |---|---|
-| **Pattern 11** — pgBackRest writes to a remote bucket | This is the vendor's normal setup, but Kasten then protects nothing. Immutability, retention, and encryption at the backup target all stay with pgBackRest, and the data is invisible to Kasten reporting. |
+| **Pattern 12** — pgBackRest writes to a remote bucket | This is the vendor's normal setup, but Kasten then protects nothing. Immutability, retention, and encryption at the backup target all stay with pgBackRest, and the data is invisible to Kasten reporting. |
 | **`PostgresBackupLocation` with `storage.pvc`** — the operator's own repository PVC, which would remove the need for MinIO | Broadcom states: *"Backup onto a PV feature is currently a tech preview, and it is not recommended for production environments."* It also drops LSN-based and transaction-ID-based recovery, requires a storage class with an `Immediate` binding policy, and has the operator take its own VolumeSnapshots of the same PVC that Kasten would snapshot. Worth revisiting when it becomes generally available. |
 | **Pattern 1** — fence and quiesce a replica | Members are managed by Patroni. Fencing one is not a supported operation: Patroni would try to restart or re-initialise the member, and the operator's reconcile loop would undo the change. It also gives no point-in-time recovery. |
 | **Pattern 2** — quiesce for crash-consistent snapshots | An HA instance has one data and one WAL PVC per pod, snapshotted at slightly different moments. Restoring that set gives Patroni members whose write-ahead logs stop at different positions, plus a stale consensus state. |
-| **Patterns 6–9** — `pg_dump` onto a PVC | No incremental backups, no point-in-time recovery, and no consistency guarantee across an HA instance without additional locking. |
+| **Patterns 6–10** — `pg_dump` onto a PVC | No incremental backups, no point-in-time recovery, and no consistency guarantee across an HA instance without additional locking. |
 
 ### What Kasten adds over letting pgBackRest write to a remote bucket
 
