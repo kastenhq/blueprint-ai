@@ -16,10 +16,14 @@ folder that matches your installation, and follow the `README.md` inside it.
 |---|---|---|---|---|
 | 5.4.0 Patch 7 | [5.4/](5.4/) | 4.21.30 | 9.0.7 | `cp4d-backup:5.4-r1` |
 | 5.2.x | [5.2/](5.2/) | 4.18.6 | 8.5.12 | `cp4d-backup:5.2-r3` |
+| 4.8.9 | [4.8/](4.8/) | 4.18.56 | 9.0.8 | `cp4d-backup:4.8-r1` |
 
 A folder is a **snapshot of what was validated** on that version. It is not updated when another
 version moves on. If your version is not listed, start from the nearest folder and re-run the
 validation (Steps 2–5 of [AGENTS.md](../AGENTS.md)) before you rely on it.
+
+CP4D 4.8 is out of IBM support since 31 July 2025; the 4.8 folder exists for installations that
+have not upgraded yet.
 
 A bundle exported on 5.2.2 imports into 5.4.0 — see [DESIGN.md § 7](DESIGN.md#7-why-latest-cpdctl-is-the-right-version-policy). Any other version
 pair is a separate validation.
