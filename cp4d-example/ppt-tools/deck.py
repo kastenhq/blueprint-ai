@@ -120,9 +120,9 @@ d.table_slide(
     "One action, and it fails the whole backup rather than protecting some projects quietly",
     ["CP4D folder", "Validated with"],
     [
-        ("5.4 (5.4.0 Patch 7)", "OpenShift 4.21.30, Kasten 9.0.7, cpdctl 1.10.34, keeper image cp4d-backup:5.4-r1"),
-        ("5.2 (5.2.x)", "OpenShift 4.18.6, Kasten 8.5.12, cpdctl 1.8.244, keeper image cp4d-backup:5.2-r3"),
-        ("4.8 (4.8.9)", "OpenShift 4.18.56, Kasten 9.0.8, cpdctl 1.10.34, keeper image cp4d-backup:4.8-r1"),
+        ("5.4 (5.4.0 Patch 7)", "OpenShift 4.21.30, Kasten 9.0.7, cpdctl 1.10.34, keeper image cp4d-backup:5.4-r2"),
+        ("5.2 (5.2.x)", "OpenShift 4.18.6, Kasten 8.5.12, cpdctl 1.8.244, keeper image cp4d-backup:5.2-r4"),
+        ("4.8 (4.8.9)", "OpenShift 4.18.56, Kasten 9.0.8, cpdctl 1.10.34, keeper image cp4d-backup:4.8-r2"),
     ],
     col_widths=[1.9, 3.95],
     row_heights=[0.5] + [0.95] * 3,
