@@ -1,0 +1,27 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: BlueprintBinding
+metadata:
+  name: mssql-logical-late-capture-binding
+  namespace: kasten-io
+spec:
+  blueprintRef:
+    name: mssql-logical-late-capture-blueprint
+    namespace: kasten-io
+  resources:
+    matchAll:
+      - type:
+          operator: In
+          values:
+            - group: apps
+              resource: deployments
+      # The label of the SQL Server Deployment in the Kasten documentation example. The
+      # blueprint also expects a container named mssql and the ServiceAccount of rbac.yaml.
+      - labels:
+          key: app
+          operator: In
+          values:
+            - mssql
+      # Let an explicit annotation on a specific Deployment win over this binding.
+      - annotations:
+          key: kanister.kasten.io/blueprint
+          operator: DoesNotExist

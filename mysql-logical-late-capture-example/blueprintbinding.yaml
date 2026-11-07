@@ -1,0 +1,32 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: BlueprintBinding
+metadata:
+  name: mysql-logical-late-capture-binding
+  namespace: kasten-io
+spec:
+  blueprintRef:
+    name: mysql-logical-late-capture-blueprint
+    namespace: kasten-io
+  resources:
+    matchAll:
+      - type:
+          operator: In
+          values:
+            - group: apps
+              resource: statefulsets
+      - labels:
+          key: app.kubernetes.io/name
+          operator: In
+          values:
+            - mysql
+      # With architecture=replication the chart also creates a secondary StatefulSet
+      # (component=secondary). The dump is taken from the primary only.
+      - labels:
+          key: app.kubernetes.io/component
+          operator: In
+          values:
+            - primary
+      # Let an explicit annotation on a specific StatefulSet win over this binding.
+      - annotations:
+          key: kanister.kasten.io/blueprint
+          operator: DoesNotExist

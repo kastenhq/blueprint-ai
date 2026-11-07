@@ -1,0 +1,30 @@
+# The dump and restore pods copy the .bak files out of (and back into) the SQL Server pod with
+# kubectl exec. This ServiceAccount gives them that right, in this namespace only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mssql-logical-backup
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mssql-logical-backup
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mssql-logical-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mssql-logical-backup
+subjects:
+  - kind: ServiceAccount
+    name: mssql-logical-backup
