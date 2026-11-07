@@ -1,0 +1,162 @@
+# Logical PostgreSQL backup on a staging PVC, captured by Kasten late capture — OpenShift
+# DeploymentConfig created by the postgresql-ephemeral / postgresql-persistent template.
+#
+# Requires Kasten 9.0.10 or later with the lateCapture feature flag:
+#   helm upgrade k10 kasten/k10 -n kasten-io --reuse-values --set features.lateCapture=true
+# Without the flag Kasten only logs a warning and ignores the lateCapture artifact: the staging
+# PVC is created, never snapshotted, then deleted, and the restore point holds no dump.
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: postgresql-logical-late-capture-openshift-blueprint
+  namespace: kasten-io
+actions:
+  backupPrehook:
+    outputArtifacts:
+      # The lateCapture prefix makes Kasten add this PVC to the restore point, although
+      # discovery ran before the PVC existed.
+      lateCapture:
+        keyValue:
+          apiVersion: "{{ .Phases.createStagingPVC.Output.apiVersion }}"
+          group: "{{ .Phases.createStagingPVC.Output.group }}"
+          resource: "{{ .Phases.createStagingPVC.Output.resource }}"
+          name: "{{ .Phases.createStagingPVC.Output.name }}"
+          namespace: "{{ .Phases.createStagingPVC.Output.namespace }}"
+    phases:
+      # Deterministic name: backupPosthook and restorePosthook can delete it by name, and a
+      # leftover from a crashed backup fails the next backup instead of going unnoticed.
+      - func: KubeOps
+        name: createStagingPVC
+        args:
+          operation: create
+          namespace: "{{ .DeploymentConfig.Namespace }}"
+          spec: |-
+            apiVersion: v1
+            kind: PersistentVolumeClaim
+            metadata:
+              name: "{{ .DeploymentConfig.Name }}-dump"
+              namespace: "{{ .DeploymentConfig.Namespace }}"
+              labels:
+                blueprint-ai/staging-pvc: "true"
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              # Cluster-specific: a CSI storage class that supports snapshots.
+              storageClassName: ocs-storagecluster-ceph-rbd
+              resources:
+                requests:
+                  storage: 2Gi
+
+      # Mounting the PVC binds it (WaitForFirstConsumer); late capture requires it Bound.
+      - func: PrepareData
+        name: dumpDatabase
+        args:
+          namespace: "{{ .DeploymentConfig.Namespace }}"
+          # The server's own image, taken from the DeploymentConfig: the tools always match the
+          # running server, whether the image comes from the openshift samples or another stream.
+          image: "{{ (index .Object.spec.template.spec.containers 0).image }}"
+          volumes:
+            "{{ .Phases.createStagingPVC.Output.name }}": /backup
+          # Without it a failed pg_dumpall still reports success and Kasten snapshots an
+          # empty or truncated dump.
+          failOnError: true
+          # No securityContext here: Kasten runs Kanister pods as root (runAsUser 0) by default,
+          # and its service account is allowed to, so the pod can write to the new volume. Do
+          # not pin the pod to restricted-v2: that SCC rejects UID 0 and the pod is not created.
+          podOverride:
+            containers:
+              - name: container
+                env:
+                  # libpq reads the password from PGPASSWORD: it never appears on a command line.
+                  - name: PGPASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: "{{ .DeploymentConfig.Name }}-{{ .DeploymentConfig.Namespace }}"
+                        key: postgresql_admin_password
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              # The template's Service has the DeploymentConfig's name.
+              rm -f /backup/dump.sql.gz /backup/dump.sql.gz.tmp
+              pg_dumpall -h "{{ .DeploymentConfig.Name }}" -U postgres --clean --if-exists \
+                | gzip > /backup/dump.sql.gz.tmp
+              mv /backup/dump.sql.gz.tmp /backup/dump.sql.gz
+              # Kasten snapshots the block device: flush the page cache or the snapshot can
+              # hold a 0-byte file.
+              sync
+              ls -l /backup/dump.sql.gz
+              gzip -t /backup/dump.sql.gz
+
+  backupPosthook:
+    phases:
+      # Kasten has already snapshotted the staging PVC. It must be gone (or terminating)
+      # when this action ends, or Kasten fails the backup.
+      - func: KubeOps
+        name: deleteStagingPVC
+        args:
+          operation: delete
+          objectReference:
+            apiVersion: v1
+            group: ""
+            resource: persistentvolumeclaims
+            name: "{{ .DeploymentConfig.Name }}-dump"
+            namespace: "{{ .DeploymentConfig.Namespace }}"
+
+  restorePosthook:
+    inputArtifactNames:
+      - lateCapture
+    phases:
+      - func: PrepareData
+        name: replayDump
+        args:
+          namespace: "{{ .DeploymentConfig.Namespace }}"
+          image: "{{ (index .Object.spec.template.spec.containers 0).image }}"
+          volumes:
+            "{{ .ArtifactsIn.lateCapture.KeyValue.name }}": /backup
+          failOnError: true
+          podOverride:
+            containers:
+              - name: container
+                env:
+                  - name: PGPASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: "{{ .DeploymentConfig.Name }}-{{ .DeploymentConfig.Namespace }}"
+                        key: postgresql_admin_password
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              HOST="{{ .DeploymentConfig.Name }}"
+              ls -l /backup/dump.sql.gz
+              # After a restore PostgreSQL may still be initializing:
+              # wait for up to 5 minutes before replaying.
+              for i in $(seq 1 30); do
+                if pg_isready -h "${HOST}" -U postgres; then break; fi
+                echo "PostgreSQL not ready (attempt ${i}/30), retrying in 10s"
+                sleep 10
+              done
+              # A --clean dump drops and recreates the postgres role, which the session itself
+              # uses. Those two statements always fail, and psql continues. Any other error
+              # fails the restore.
+              zcat /backup/dump.sql.gz | psql -h "${HOST}" -U postgres -d postgres -q -o /dev/null 2>/tmp/psql.err
+              cat /tmp/psql.err
+              if grep '^ERROR' /tmp/psql.err \
+                   | grep -v -e 'current user cannot be dropped' -e 'role "postgres" already exists'; then
+                echo "Unexpected errors while replaying the dump"
+                exit 1
+              fi
+
+      # The restored staging PVC must not survive: the next backup would fail on it.
+      - func: KubeOps
+        name: deleteRestoredPVC
+        args:
+          operation: delete
+          objectReference:
+            apiVersion: v1
+            group: ""
+            resource: persistentvolumeclaims
+            name: "{{ .ArtifactsIn.lateCapture.KeyValue.name }}"
+            namespace: "{{ .DeploymentConfig.Namespace }}"

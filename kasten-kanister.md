@@ -246,7 +246,9 @@ Reference blueprints: [mongodb-logical-late-capture-example](mongodb-logical-lat
 [mysql-logical-late-capture-example](mysql-logical-late-capture-example/),
 [postgresql-logical-late-capture-example](postgresql-logical-late-capture-example/) and
 [mssql-logical-late-capture-example](mssql-logical-late-capture-example/) — ports of the Kasten
-documentation's logical backup examples.
+documentation's logical backup examples — and, on OpenShift `DeploymentConfigs`,
+[mysql-logical-late-capture-openshift-example](mysql-logical-late-capture-openshift-example/) and
+[postgresql-logical-late-capture-openshift-example](postgresql-logical-late-capture-openshift-example/).
 
 ### Reserved Action Names — Backup
 
@@ -565,9 +567,17 @@ The following functions are commonly used in a blueprint and how to use them in 
   pinned by Kasten `9.0.10`). A failed `mongodump` or `pg_dump` then leaves an empty or truncated
   file, Kasten snapshots it, and the restore point is green. Always set `failOnError: true` and
   start the script with `set -euo pipefail`.
-- **`PrepareData` and file ownership.** A new EBS (or similar) volume is owned by `root`. An image
-  that runs as a non-root user (Bitnami images run as `1001`) cannot write to it. Set
-  `podOverride.securityContext.fsGroup` to that user's group.
+- **`PrepareData` and file ownership.** A new EBS (or similar) volume is owned by `root`. Kasten
+  adds its own pod override to every Kanister pod, and by default it runs the pod **as root**
+  (`runAsUser: 0`, `runAsNonRoot: false`), which can write to the volume. A `securityContext` in
+  the blueprint's `podOverride` replaces Kasten's. If you set one to run as the image's non-root
+  user (Bitnami images run as `1001`), also set `fsGroup` to that user's group, or the user
+  cannot write to the volume.
+- **`PrepareData` on OpenShift: do not pin a restricted SCC.** Kasten's service account may create
+  pods under broad SCCs, and the pod runs as root (see above). An annotation such as
+  `openshift.io/required-scc: restricted-v2` makes the pod creation fail with
+  *"runAsUser: Invalid value: 0: must be in the ranges"*. Leave the SCC choice to Kasten (see
+  [mysql-logical-late-capture-openshift-example](mysql-logical-late-capture-openshift-example/)).
 
   ```yaml
   - func: PrepareData
@@ -1035,7 +1045,10 @@ actions:
   [mysql-logical-late-capture-example](./mysql-logical-late-capture-example/),
   [postgresql-logical-late-capture-example](./postgresql-logical-late-capture-example/),
   [mssql-logical-late-capture-example](./mssql-logical-late-capture-example/) (bound to a
-  Deployment; the `.bak` files pass through the SQL Server container's filesystem first)
+  Deployment; the `.bak` files pass through the SQL Server container's filesystem first),
+  [mysql-logical-late-capture-openshift-example](./mysql-logical-late-capture-openshift-example/),
+  [postgresql-logical-late-capture-openshift-example](./postgresql-logical-late-capture-openshift-example/)
+  (bound to OpenShift `DeploymentConfigs`)
 - **Pro**: No keeper Deployment, no change to the workload, no storage used between backups.
   Resource-bound, so BlueprintBinding works and several workload types can share a namespace.
   A dump allows a granular restore (one database, one collection). Kasten remains the data mover
