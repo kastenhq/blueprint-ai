@@ -242,7 +242,11 @@ dump ([mongodb-logical-late-capture-example](mongodb-logical-late-capture-exampl
 100%, because the changes touched every chunk. `gzip` did not change either result. A tool that needs its previous backup on the volume (an incremental
 chain, append-only snapshot files) cannot use a staging PVC: it is empty at every backup.
 
-Reference blueprint: [mongodb-logical-late-capture-example](mongodb-logical-late-capture-example/).
+Reference blueprints: [mongodb-logical-late-capture-example](mongodb-logical-late-capture-example/),
+[mysql-logical-late-capture-example](mysql-logical-late-capture-example/),
+[postgresql-logical-late-capture-example](postgresql-logical-late-capture-example/) and
+[mssql-logical-late-capture-example](mssql-logical-late-capture-example/) — ports of the Kasten
+documentation's logical backup examples.
 
 ### Reserved Action Names — Backup
 
@@ -1027,7 +1031,11 @@ actions:
   full database snapshot) to it with `PrepareData`, runs `sync`, and declares the PVC in a
   `lateCapture` output artifact. Kasten snapshots it with the other PVCs. `backupPosthook` deletes
   it. On restore, Kasten restores the PVC, and `restorePosthook` replays the dump and deletes the PVC.
-- **Example**: [mongodb-logical-late-capture-example](./mongodb-logical-late-capture-example/)
+- **Examples**: [mongodb-logical-late-capture-example](./mongodb-logical-late-capture-example/),
+  [mysql-logical-late-capture-example](./mysql-logical-late-capture-example/),
+  [postgresql-logical-late-capture-example](./postgresql-logical-late-capture-example/),
+  [mssql-logical-late-capture-example](./mssql-logical-late-capture-example/) (bound to a
+  Deployment; the `.bak` files pass through the SQL Server container's filesystem first)
 - **Pro**: No keeper Deployment, no change to the workload, no storage used between backups.
   Resource-bound, so BlueprintBinding works and several workload types can share a namespace.
   A dump allows a granular restore (one database, one collection). Kasten remains the data mover
