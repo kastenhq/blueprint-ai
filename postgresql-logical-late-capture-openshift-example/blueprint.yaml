@@ -46,7 +46,9 @@ actions:
                 requests:
                   storage: 2Gi
 
-      # Mounting the PVC binds it (WaitForFirstConsumer); late capture requires it Bound.
+      # Write the dump to the staging PVC. Side effect: with a WaitForFirstConsumer storage class,
+      # this mount is also what binds the PVC, and late capture fails on a PVC that is not Bound.
+      # If you change how the dump is made, keep a pod that mounts the PVC during backupPrehook.
       - func: PrepareData
         name: dumpDatabase
         args:
