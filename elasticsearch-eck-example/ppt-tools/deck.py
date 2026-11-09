@@ -31,10 +31,10 @@ d.hero(
     icon='error_warning', polarity='neg')
 
 d.cards(
-    "Pattern 3, not pattern 7 — and the reason is operational",
+    "Pattern 3, not pattern 8 — and the reason is operational",
     "A temporary repository PVC would be preferable on paper, but not in practice here",
     [
-        ('close_circle', "WHAT PATTERN 7 WOULD COST", [
+        ('close_circle', "WHAT PATTERN 8 WOULD COST", [
             "The Elasticsearch filesystem repository needs path.repo set in "
             "elasticsearch.yml at pod startup.",
             "",

@@ -1,0 +1,31 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: BlueprintBinding
+metadata:
+  name: mongodb-logical-late-capture-binding
+  namespace: kasten-io
+spec:
+  blueprintRef:
+    name: mongodb-logical-late-capture-blueprint
+    namespace: kasten-io
+  resources:
+    matchAll:
+      - type:
+          operator: In
+          values:
+            - group: apps
+              resource: statefulsets
+      - labels:
+          key: app.kubernetes.io/name
+          operator: In
+          values:
+            - mongodb
+      # The chart also creates an arbiter StatefulSet (component=arbiter), which holds no data.
+      - labels:
+          key: app.kubernetes.io/component
+          operator: In
+          values:
+            - mongodb
+      # Let an explicit annotation on a specific StatefulSet win over this binding.
+      - annotations:
+          key: kanister.kasten.io/blueprint
+          operator: DoesNotExist

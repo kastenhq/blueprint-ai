@@ -1,0 +1,158 @@
+# Logical MySQL backup on a staging PVC, captured by Kasten late capture — OpenShift
+# DeploymentConfig created by the mysql-ephemeral / mysql-persistent template.
+#
+# Requires Kasten 9.0.10 or later with the lateCapture feature flag:
+#   helm upgrade k10 kasten/k10 -n kasten-io --reuse-values --set features.lateCapture=true
+# Without the flag Kasten only logs a warning and ignores the lateCapture artifact: the staging
+# PVC is created, never snapshotted, then deleted, and the restore point holds no dump.
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: mysql-logical-late-capture-openshift-blueprint
+  namespace: kasten-io
+actions:
+  backupPrehook:
+    outputArtifacts:
+      # The lateCapture prefix makes Kasten add this PVC to the restore point, although
+      # discovery ran before the PVC existed.
+      lateCapture:
+        keyValue:
+          apiVersion: "{{ .Phases.createStagingPVC.Output.apiVersion }}"
+          group: "{{ .Phases.createStagingPVC.Output.group }}"
+          resource: "{{ .Phases.createStagingPVC.Output.resource }}"
+          name: "{{ .Phases.createStagingPVC.Output.name }}"
+          namespace: "{{ .Phases.createStagingPVC.Output.namespace }}"
+    phases:
+      # Deterministic name: backupPosthook and restorePosthook can delete it by name, and a
+      # leftover from a crashed backup fails the next backup instead of going unnoticed.
+      - func: KubeOps
+        name: createStagingPVC
+        args:
+          operation: create
+          namespace: "{{ .DeploymentConfig.Namespace }}"
+          spec: |-
+            apiVersion: v1
+            kind: PersistentVolumeClaim
+            metadata:
+              name: "{{ .DeploymentConfig.Name }}-dump"
+              namespace: "{{ .DeploymentConfig.Namespace }}"
+              labels:
+                blueprint-ai/staging-pvc: "true"
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              # Cluster-specific: a CSI storage class that supports snapshots.
+              storageClassName: ocs-storagecluster-ceph-rbd
+              resources:
+                requests:
+                  storage: 2Gi
+
+      # Write the dump to the staging PVC. Side effect: with a WaitForFirstConsumer storage class,
+      # this mount is also what binds the PVC, and late capture fails on a PVC that is not Bound.
+      # If you change how the dump is made, keep a pod that mounts the PVC during backupPrehook.
+      - func: PrepareData
+        name: dumpDatabase
+        args:
+          namespace: "{{ .DeploymentConfig.Namespace }}"
+          # The server's own image, taken from the DeploymentConfig: the tools always match the
+          # running server, whether the image comes from the openshift samples or another stream.
+          image: "{{ (index .Object.spec.template.spec.containers 0).image }}"
+          volumes:
+            "{{ .Phases.createStagingPVC.Output.name }}": /backup
+          # Without it a failed mysqldump still reports success and Kasten snapshots an
+          # empty or truncated dump.
+          failOnError: true
+          # No securityContext here: Kasten runs Kanister pods as root (runAsUser 0) by default,
+          # and its service account is allowed to, so the pod can write to the new volume. Do
+          # not pin the pod to restricted-v2: that SCC rejects UID 0 and the pod is not created.
+          podOverride:
+            containers:
+              - name: container
+                env:
+                  # The mysql client reads the password from MYSQL_PWD: it never appears on a
+                  # command line.
+                  - name: MYSQL_PWD
+                    valueFrom:
+                      secretKeyRef:
+                        name: "{{ .DeploymentConfig.Name }}"
+                        key: database-root-password
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              # The template's Service has the DeploymentConfig's name. root@% is the account
+              # with the password (root@localhost uses the socket).
+              rm -f /backup/dump.sql.gz /backup/dump.sql.gz.tmp
+              mysqldump -h "{{ .DeploymentConfig.Name }}" -u root \
+                --single-transaction --all-databases --routines --events \
+                | gzip > /backup/dump.sql.gz.tmp
+              mv /backup/dump.sql.gz.tmp /backup/dump.sql.gz
+              # Kasten snapshots the block device: flush the page cache or the snapshot can
+              # hold a 0-byte file.
+              sync
+              ls -l /backup/dump.sql.gz
+              gzip -t /backup/dump.sql.gz
+
+  backupPosthook:
+    phases:
+      # Kasten has already snapshotted the staging PVC. It must be gone (or terminating)
+      # when this action ends, or Kasten fails the backup.
+      - func: KubeOps
+        name: deleteStagingPVC
+        args:
+          operation: delete
+          objectReference:
+            apiVersion: v1
+            group: ""
+            resource: persistentvolumeclaims
+            name: "{{ .DeploymentConfig.Name }}-dump"
+            namespace: "{{ .DeploymentConfig.Namespace }}"
+
+  restorePosthook:
+    inputArtifactNames:
+      - lateCapture
+    phases:
+      - func: PrepareData
+        name: replayDump
+        args:
+          namespace: "{{ .DeploymentConfig.Namespace }}"
+          image: "{{ (index .Object.spec.template.spec.containers 0).image }}"
+          volumes:
+            "{{ .ArtifactsIn.lateCapture.KeyValue.name }}": /backup
+          failOnError: true
+          podOverride:
+            containers:
+              - name: container
+                env:
+                  - name: MYSQL_PWD
+                    valueFrom:
+                      secretKeyRef:
+                        name: "{{ .DeploymentConfig.Name }}"
+                        key: database-root-password
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              ls -l /backup/dump.sql.gz
+              # After a restore MySQL may still be initializing: wait for up to 5 minutes.
+              for i in $(seq 1 30); do
+                if mysqladmin -h "{{ .DeploymentConfig.Name }}" -u root ping >/dev/null 2>&1; then
+                  break
+                fi
+                echo "MySQL not ready (attempt ${i}/30), retrying in 10s"
+                sleep 10
+              done
+              zcat /backup/dump.sql.gz | mysql -h "{{ .DeploymentConfig.Name }}" -u root
+
+      # The restored staging PVC must not survive: the next backup would fail on it.
+      - func: KubeOps
+        name: deleteRestoredPVC
+        args:
+          operation: delete
+          objectReference:
+            apiVersion: v1
+            group: ""
+            resource: persistentvolumeclaims
+            name: "{{ .ArtifactsIn.lateCapture.KeyValue.name }}"
+            namespace: "{{ .DeploymentConfig.Namespace }}"

@@ -1,0 +1,185 @@
+# Logical Microsoft SQL Server backup on a staging PVC, captured by Kasten late capture.
+#
+# Requires Kasten 9.0.10 or later with the lateCapture feature flag:
+#   helm upgrade k10 kasten/k10 -n kasten-io --reuse-values --set features.lateCapture=true
+# Without the flag Kasten only logs a warning and ignores the lateCapture artifact: the staging
+# PVC is created, never snapshotted, then deleted, and the restore point holds no dump.
+#
+# SQL Server writes a .bak file on its own filesystem; the staging PVC cannot be mounted into the
+# running SQL Server pod. The backup is therefore written to /tmp in the SQL Server container
+# (the node's disk) and then streamed to the staging PVC with kubectl exec. See the README for
+# the risk this carries and for the pattern that avoids it.
+#
+# Requires rbac.yaml in the application namespace (ServiceAccount mssql-logical-backup).
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: mssql-logical-late-capture-blueprint
+  namespace: kasten-io
+actions:
+  backupPrehook:
+    outputArtifacts:
+      # The lateCapture prefix makes Kasten add this PVC to the restore point, although
+      # discovery ran before the PVC existed.
+      lateCapture:
+        keyValue:
+          apiVersion: "{{ .Phases.createStagingPVC.Output.apiVersion }}"
+          group: "{{ .Phases.createStagingPVC.Output.group }}"
+          resource: "{{ .Phases.createStagingPVC.Output.resource }}"
+          name: "{{ .Phases.createStagingPVC.Output.name }}"
+          namespace: "{{ .Phases.createStagingPVC.Output.namespace }}"
+    phases:
+      # Deterministic name: backupPosthook and restorePosthook can delete it by name, and a
+      # leftover from a crashed backup fails the next backup instead of going unnoticed.
+      - func: KubeOps
+        name: createStagingPVC
+        args:
+          operation: create
+          namespace: "{{ .Deployment.Namespace }}"
+          spec: |-
+            apiVersion: v1
+            kind: PersistentVolumeClaim
+            metadata:
+              name: "{{ .Deployment.Name }}-dump"
+              namespace: "{{ .Deployment.Namespace }}"
+              labels:
+                blueprint-ai/staging-pvc: "true"
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              # Cluster-specific: a CSI storage class that supports snapshots.
+              storageClassName: gp3
+              resources:
+                requests:
+                  storage: 2Gi
+
+      # Write the dump to the staging PVC. Side effect: with a WaitForFirstConsumer storage class,
+      # this mount is also what binds the PVC, and late capture fails on a PVC that is not Bound.
+      # If you change how the dump is made, keep a pod that mounts the PVC during backupPrehook.
+      - func: PrepareData
+        name: dumpDatabases
+        args:
+          namespace: "{{ .Deployment.Namespace }}"
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.10
+          # kubectl exec into the SQL Server pod, in this namespace only (rbac.yaml).
+          serviceaccount: mssql-logical-backup
+          volumes:
+            "{{ .Phases.createStagingPVC.Output.name }}": /backup
+          # Without it a failed BACKUP still reports success and Kasten snapshots an empty
+          # or partial dump.
+          failOnError: true
+          podOverride:
+            securityContext:
+              runAsUser: 1001
+              runAsGroup: 1001
+              fsGroup: 1001
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              NS="{{ .Deployment.Namespace }}"
+              POD="{{ index .Deployment.Pods 0 }}"
+              # sqlcmd runs inside the SQL Server container and reads SA_PASSWORD from its
+              # environment: the password never leaves that pod.
+              kubectl exec -n "${NS}" "${POD}" -c mssql -- bash -c '
+                set -euo pipefail
+                SQLCMD="/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P ${SA_PASSWORD} -b -h -1 -W"
+                rm -rf /tmp/mssql-backup && mkdir -p /tmp/mssql-backup
+                # The .bak files go to the container filesystem (node disk) first. Refuse to
+                # start when the data files are larger than the free space there, rather than
+                # filling the node disk and getting the SQL Server pod evicted.
+                NEED_KB=$(${SQLCMD} -Q "SET NOCOUNT ON; SELECT COALESCE(SUM(CAST(size AS BIGINT)) * 8, 0) FROM sys.master_files WHERE database_id > 4 AND type = 0")
+                FREE_KB=$(df -Pk /tmp | awk "NR==2 {print \$4}")
+                echo "user data files: ${NEED_KB} KB, free in /tmp: ${FREE_KB} KB"
+                if [ "${NEED_KB}" -gt "${FREE_KB}" ]; then
+                  echo "Not enough space in /tmp of the SQL Server container for the backup"
+                  exit 1
+                fi
+                DBS=$(${SQLCMD} -Q "SET NOCOUNT ON; SELECT name FROM sys.databases WHERE database_id > 4 AND state_desc = N'"'"'ONLINE'"'"'")
+                for db in ${DBS}; do
+                  ${SQLCMD} -Q "BACKUP DATABASE [${db}] TO DISK = N'"'"'/tmp/mssql-backup/${db}.bak'"'"' WITH FORMAT, INIT, CHECKSUM"
+                done
+                ls -l /tmp/mssql-backup'
+              rm -rf /backup/mssql-backup
+              kubectl exec -n "${NS}" "${POD}" -c mssql -- tar cf - -C /tmp mssql-backup | tar xf - -C /backup
+              kubectl exec -n "${NS}" "${POD}" -c mssql -- rm -rf /tmp/mssql-backup
+              # Kasten snapshots the block device: flush the page cache or the snapshot can
+              # hold 0-byte files.
+              sync
+              ls -l /backup/mssql-backup
+
+  backupPosthook:
+    phases:
+      # Kasten has already snapshotted the staging PVC. It must be gone (or terminating)
+      # when this action ends, or Kasten fails the backup.
+      - func: KubeOps
+        name: deleteStagingPVC
+        args:
+          operation: delete
+          objectReference:
+            apiVersion: v1
+            group: ""
+            resource: persistentvolumeclaims
+            name: "{{ .Deployment.Name }}-dump"
+            namespace: "{{ .Deployment.Namespace }}"
+
+  restorePosthook:
+    inputArtifactNames:
+      - lateCapture
+    phases:
+      - func: PrepareData
+        name: restoreDatabases
+        args:
+          namespace: "{{ .Deployment.Namespace }}"
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.10
+          serviceaccount: mssql-logical-backup
+          volumes:
+            "{{ .ArtifactsIn.lateCapture.KeyValue.name }}": /backup
+          failOnError: true
+          podOverride:
+            securityContext:
+              runAsUser: 1001
+              runAsGroup: 1001
+              fsGroup: 1001
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              NS="{{ .Deployment.Namespace }}"
+              POD="{{ index .Deployment.Pods 0 }}"
+              ls -l /backup/mssql-backup
+              # After a restore into an empty namespace SQL Server may still be starting:
+              # wait for up to 5 minutes.
+              for i in $(seq 1 30); do
+                if kubectl exec -n "${NS}" "${POD}" -c mssql -- bash -c \
+                     '/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "${SA_PASSWORD}" -b -Q "SELECT 1"' >/dev/null 2>&1; then
+                  break
+                fi
+                echo "SQL Server not ready (attempt ${i}/30), retrying in 10s"
+                sleep 10
+              done
+              # RESTORE reads the file on the server side: copy the .bak files back into the
+              # SQL Server container first (node disk again).
+              kubectl exec -n "${NS}" "${POD}" -c mssql -- rm -rf /tmp/mssql-backup
+              tar cf - -C /backup mssql-backup | kubectl exec -i -n "${NS}" "${POD}" -c mssql -- tar xf - -C /tmp
+              kubectl exec -n "${NS}" "${POD}" -c mssql -- bash -c '
+                set -euo pipefail
+                SQLCMD="/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P ${SA_PASSWORD} -b"
+                for f in /tmp/mssql-backup/*.bak; do
+                  db=$(basename "${f}" .bak)
+                  ${SQLCMD} -Q "RESTORE DATABASE [${db}] FROM DISK = N'"'"'${f}'"'"' WITH REPLACE, CHECKSUM"
+                done
+                rm -rf /tmp/mssql-backup'
+
+      # The restored staging PVC must not survive: the next backup would fail on it.
+      - func: KubeOps
+        name: deleteRestoredPVC
+        args:
+          operation: delete
+          objectReference:
+            apiVersion: v1
+            group: ""
+            resource: persistentvolumeclaims
+            name: "{{ .ArtifactsIn.lateCapture.KeyValue.name }}"
+            namespace: "{{ .Deployment.Namespace }}"

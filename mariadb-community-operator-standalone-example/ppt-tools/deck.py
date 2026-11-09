@@ -59,7 +59,7 @@ d.cards(
     note=("The limitation you are accepting.",
           "Granular restore is not possible: the whole PVC is restored, so you cannot "
           "recover a single table or database. If that matters more than incrementality, "
-          "switch to pattern 8, a logical dump on a temporary PVC."))
+          "switch to pattern 9, a logical dump on a temporary PVC."))
 
 d.flow(
     "Pattern 2 — quiesce and unquiesce",

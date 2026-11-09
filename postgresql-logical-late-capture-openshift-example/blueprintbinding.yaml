@@ -1,0 +1,27 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: BlueprintBinding
+metadata:
+  name: postgresql-logical-late-capture-openshift-binding
+  namespace: kasten-io
+spec:
+  blueprintRef:
+    name: postgresql-logical-late-capture-openshift-blueprint
+    namespace: kasten-io
+  resources:
+    matchAll:
+      - type:
+          operator: In
+          values:
+            - group: apps.openshift.io
+              resource: deploymentconfigs
+      # The label the OpenShift PostgreSQL templates put on every object they create.
+      - labels:
+          key: template
+          operator: In
+          values:
+            - postgresql-ephemeral-template
+            - postgresql-persistent-template
+      # Let an explicit annotation on a specific DeploymentConfig win over this binding.
+      - annotations:
+          key: kanister.kasten.io/blueprint
+          operator: DoesNotExist

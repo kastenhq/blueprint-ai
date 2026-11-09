@@ -1,0 +1,163 @@
+# Logical MongoDB backup on a staging PVC, captured by Kasten late capture.
+#
+# Requires Kasten 9.0.10 or later with the lateCapture feature flag:
+#   helm upgrade k10 kasten/k10 -n kasten-io --reuse-values --set features.lateCapture=true
+# Without the flag Kasten only logs a warning and ignores the lateCapture artifact: the staging
+# PVC is created, never snapshotted, then deleted, and the restore point holds no dump.
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: mongodb-logical-late-capture-blueprint
+  namespace: kasten-io
+actions:
+  backupPrehook:
+    outputArtifacts:
+      # The lateCapture prefix makes Kasten add this PVC to the restore point, although
+      # discovery ran before the PVC existed.
+      lateCapture:
+        keyValue:
+          apiVersion: "{{ .Phases.createStagingPVC.Output.apiVersion }}"
+          group: "{{ .Phases.createStagingPVC.Output.group }}"
+          resource: "{{ .Phases.createStagingPVC.Output.resource }}"
+          name: "{{ .Phases.createStagingPVC.Output.name }}"
+          namespace: "{{ .Phases.createStagingPVC.Output.namespace }}"
+    phases:
+      # Deterministic name: backupPosthook and restorePosthook can delete it by name, and a
+      # leftover from a crashed backup fails the next backup instead of going unnoticed.
+      - func: KubeOps
+        name: createStagingPVC
+        args:
+          operation: create
+          namespace: "{{ .StatefulSet.Namespace }}"
+          spec: |-
+            apiVersion: v1
+            kind: PersistentVolumeClaim
+            metadata:
+              name: "{{ .StatefulSet.Name }}-dump"
+              namespace: "{{ .StatefulSet.Namespace }}"
+              labels:
+                blueprint-ai/staging-pvc: "true"
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              # Cluster-specific: a CSI storage class that supports snapshots.
+              storageClassName: gp3
+              resources:
+                requests:
+                  storage: 2Gi
+
+      # Write the dump to the staging PVC. Side effect: with a WaitForFirstConsumer storage class,
+      # this mount is also what binds the PVC, and late capture fails on a PVC that is not Bound.
+      # If you change how the dump is made, keep a pod that mounts the PVC during backupPrehook.
+      - func: PrepareData
+        name: dumpDatabase
+        args:
+          namespace: "{{ .StatefulSet.Namespace }}"
+          image: docker.io/bitnamilegacy/mongodb:8.0.11-debian-12-r1
+          volumes:
+            "{{ .Phases.createStagingPVC.Output.name }}": /backup
+          # Without it a failed mongodump still reports success and Kasten snapshots an
+          # empty or truncated dump.
+          failOnError: true
+          podOverride:
+            securityContext:
+              runAsUser: 1001
+              runAsGroup: 1001
+              fsGroup: 1001
+            containers:
+              - name: container
+                env:
+                  - name: MONGODB_ROOT_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: "{{ .StatefulSet.Name }}"
+                        key: mongodb-root-password
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              # replicaSetName of the Bitnami chart (default rs0).
+              REPLICA_SET=rs0
+              HOSTS="{{ range $i, $p := .StatefulSet.Pods }}{{ if $i }},{{ end }}{{ $p }}.{{ $.StatefulSet.Name }}-headless:27017{{ end }}"
+              rm -f /backup/rs_backup.gz
+              mongodump --host "${REPLICA_SET}/${HOSTS}" \
+                -u root -p "${MONGODB_ROOT_PASSWORD}" --authenticationDatabase admin \
+                --oplog --gzip --archive=/backup/rs_backup.gz
+              # Kasten snapshots the block device: flush the page cache or the snapshot can
+              # hold a 0-byte file.
+              sync
+              ls -l /backup/rs_backup.gz
+              test -s /backup/rs_backup.gz
+
+  backupPosthook:
+    phases:
+      # Kasten has already snapshotted the staging PVC. It must be gone (or terminating)
+      # when this action ends, or Kasten fails the backup.
+      - func: KubeOps
+        name: deleteStagingPVC
+        args:
+          operation: delete
+          objectReference:
+            apiVersion: v1
+            group: ""
+            resource: persistentvolumeclaims
+            name: "{{ .StatefulSet.Name }}-dump"
+            namespace: "{{ .StatefulSet.Namespace }}"
+
+  restorePosthook:
+    inputArtifactNames:
+      - lateCapture
+    phases:
+      - func: PrepareData
+        name: replayDump
+        args:
+          namespace: "{{ .StatefulSet.Namespace }}"
+          image: docker.io/bitnamilegacy/mongodb:8.0.11-debian-12-r1
+          volumes:
+            "{{ .ArtifactsIn.lateCapture.KeyValue.name }}": /backup
+          failOnError: true
+          podOverride:
+            securityContext:
+              runAsUser: 1001
+              runAsGroup: 1001
+              fsGroup: 1001
+            containers:
+              - name: container
+                env:
+                  - name: MONGODB_ROOT_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: "{{ .StatefulSet.Name }}"
+                        key: mongodb-root-password
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              REPLICA_SET=rs0
+              HOSTS="{{ range $i, $p := .StatefulSet.Pods }}{{ if $i }},{{ end }}{{ $p }}.{{ $.StatefulSet.Name }}-headless:27017{{ end }}"
+              ls -l /backup/rs_backup.gz
+              # After a restore into an empty namespace the replica set may still be electing
+              # a primary: retry for up to 5 minutes.
+              for i in $(seq 1 30); do
+                if mongorestore --host "${REPLICA_SET}/${HOSTS}" \
+                     -u root -p "${MONGODB_ROOT_PASSWORD}" --authenticationDatabase admin \
+                     --oplogReplay --drop --gzip --archive=/backup/rs_backup.gz; then
+                  exit 0
+                fi
+                echo "mongorestore failed (attempt ${i}/30), retrying in 10s"
+                sleep 10
+              done
+              exit 1
+
+      # The restored staging PVC must not survive: the next backup would fail on it.
+      - func: KubeOps
+        name: deleteRestoredPVC
+        args:
+          operation: delete
+          objectReference:
+            apiVersion: v1
+            group: ""
+            resource: persistentvolumeclaims
+            name: "{{ .ArtifactsIn.lateCapture.KeyValue.name }}"
+            namespace: "{{ .StatefulSet.Namespace }}"

@@ -20,8 +20,8 @@ job is to make the on-disk state consistent at snapshot time.
   operator** reconciling the StatefulSet (unlike operator-managed databases).
 
 **Why not other patterns:** there is no replica in standalone (rules out Pattern 1 fence-a-replica);
-InnoDB crash-consistent snapshots make logical dumps (patterns 3–9) unnecessary and non-incremental;
-Bitnami is a self-managed StatefulSet with no backup API (rules out patterns 10–11). This pattern is
+InnoDB crash-consistent snapshots make logical dumps (patterns 3–10) unnecessary and non-incremental;
+Bitnami is a self-managed StatefulSet with no backup API (rules out patterns 11–12). This pattern is
 incremental (constant backup time as data grows, via block-level CSI snapshots) and
 BlueprintBinding-compatible, preserving SRP/OCP.
 

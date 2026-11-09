@@ -1,0 +1,35 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Policy
+metadata:
+  name: postgresql-logical-backup
+  namespace: kasten-io
+spec:
+  comment: "Logical backup: the dump on the late-captured staging PVC"
+  frequency: "@onDemand"
+  actions:
+    - action: backup
+      backupParameters:
+        profile:
+          # A Location profile (not an Infra profile): the blueprint passes the lateCapture
+          # artifact from backupPrehook to restorePosthook, which requires one.
+          name: <LOCATION_PROFILE>
+          namespace: kasten-io
+        # No filter: the ephemeral template has no data PVC. With the persistent template,
+        # exclude the data PVC here if the dump is meant to replace it (see README). Never
+        # match the staging PVC: late capture fails the backup if the policy excludes it.
+    # The local snapshot of the staging PVC is deleted with the namespace. Export it, so the
+    # dump survives the loss of the namespace or the cluster.
+    - action: export
+      exportParameters:
+        frequency: "@onDemand"
+        profile:
+          name: <LOCATION_PROFILE>
+          namespace: kasten-io
+        exportData:
+          enabled: true
+  selector:
+    matchExpressions:
+      - key: k10.kasten.io/appNamespace
+        operator: In
+        values:
+          - postgresql-logical

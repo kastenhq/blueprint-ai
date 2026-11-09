@@ -1,0 +1,42 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Policy
+metadata:
+  name: mysql-logical-backup
+  namespace: kasten-io
+spec:
+  comment: "Logical MySQL backup: the dump on the late-captured staging PVC, not the data PVCs"
+  frequency: "@onDemand"
+  actions:
+    - action: backup
+      backupParameters:
+        profile:
+          # A Location profile (not an Infra profile): the blueprint passes the lateCapture
+          # artifact from backupPrehook to restorePosthook, which requires one.
+          name: <LOCATION_PROFILE>
+          namespace: kasten-io
+        filters:
+          # The dump is the backup. Exclude the MySQL data PVCs so Kasten does not also
+          # snapshot them. Restrict the rule to PVCs: the StatefulSet carries the same label,
+          # and excluding it would stop the blueprint from running.
+          # The staging PVC does not carry this label, so the filter never excludes it
+          # (late capture fails the backup if the policy excludes a declared PVC).
+          excludeResources:
+            - resource: persistentvolumeclaims
+              matchLabels:
+                app.kubernetes.io/name: mysql
+    # The local snapshot of the staging PVC is deleted with the namespace. Export it, so the
+    # dump survives the loss of the namespace or the cluster.
+    - action: export
+      exportParameters:
+        frequency: "@onDemand"
+        profile:
+          name: <LOCATION_PROFILE>
+          namespace: kasten-io
+        exportData:
+          enabled: true
+  selector:
+    matchExpressions:
+      - key: k10.kasten.io/appNamespace
+        operator: In
+        values:
+          - mysql-logical
