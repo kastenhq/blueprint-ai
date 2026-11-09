@@ -287,11 +287,19 @@ The rules that matter when you write one:
    command that checks the flag (`kubectl get cm k10-features -n kasten-io -o jsonpath='{.data.lateCapture}'`).
    Say what happens without the flag: **the backup succeeds and holds no dump.** Kasten only logs a
    warning and ignores the declaration.
-2. **Do not convert an existing blueprint to late capture.** It records what was validated on its
-   own Kasten version. Use late capture for new blueprints, or in a new copy.
-3. **Use a deterministic name** for the staging PVC (`{{ .StatefulSet.Name }}-dump`).
-   `backupPosthook` and `restorePosthook` delete it by name, and Kasten reports a leftover
-   instead of snapshotting it silently at every backup.
+2. **Do not change an existing blueprint to use late capture.** Its README and versions table
+   describe what was tested on an older Kasten version, and users who run that version still need
+   the blueprint as it is: late capture needs Kasten `9.0.10` and the feature flag. Create a new
+   blueprint directory (or a new version folder) instead, and re-run Steps 2–5 on it.
+3. **Use a deterministic name** for the staging PVC (`{{ .StatefulSet.Name }}-dump`), never a
+   generated one. Both posthooks delete the PVC by name. If a run is interrupted (crash, cancel)
+   and the PVC is left behind, Kasten finds it, because it checks the names that the current run
+   declares: exactly one backup fails with the "stale" error, the `backupPosthook` of that failed
+   backup deletes the PVC, and the next backup succeeds. With a generated name, every run declares
+   a new name, so Kasten does not recognise the leftover. It is treated as an ordinary application
+   PVC: snapshotted and exported at every backup, restored with the application, and never
+   deleted, with no error. The new dump is still captured and replayed correctly; the cost is
+   wasted storage that nobody notices.
 4. **Delete the PVC in `backupPosthook` and at the end of `restorePosthook`.** A PVC that still
    exists after `backupPosthook` fails the backup; a restored PVC that still exists fails the next
    backup.
