@@ -155,12 +155,17 @@ kubectl get cm icp4adeploy-cp4ba-access-info -n ${CP4BA_NS} -o jsonpath='{.data}
 kubectl get secret icp4adeploy-openldap-customldif -n ${CP4BA_NS} -o jsonpath='{.data.ldap_user\.ldif}' | base64 -d
 ```
 
-1. Open **ACCE** and log in as `cp4admin` (Enterprise LDAP). In the tree on the left, the domain
-   has one or more **object stores**. Write down the name of the one created by the Starter install
-   — it is used everywhere below as `<OS>`.
-2. Still in ACCE, open `<OS>` → **Administrative → Storage → Storage Areas**. Note the kind of each
-   storage area (§2.3) and, for a file storage area, its **root directory**. This is the first
-   answer of §5.
+1. Open **ACCE** (in the ConfigMap, `cpe-access-info` → *Content Platform Engine administration*)
+   and log in as `cp4admin` (Enterprise LDAP). In the tree on the left, expand **Object Stores**
+   (click the triangle, not the label). Starter creates four: `CONTENT`, `DESIGN`, `DEVOS1` and
+   `TARGET`. Documents go to **`CONTENT`** — it is used everywhere below as `<OS>`.
+2. Click `<OS>`: it opens in a new tab, with its own tree. Open **Administrative → Storage →
+   Storage Areas**. Note the kind of each storage area (§2.3) and, for a file storage area, its
+   **root directory**. This is the first answer of §5.
+   *Measured on Starter: one storage area, `Default Database Storage Area`, kind **Database
+   Storage Area**.* The class decides where new content goes: **Data Design → Classes →
+   Document**, field *Default storage policy* (`Default Database Storage Policy`). When *Default
+   storage area* is `<None>`, the policy applies.
 3. Open **Navigator**. Check that the desktop shows `<OS>` as a repository and that you can browse
    it. If it is empty, that is expected: nothing has been added yet.
 
@@ -187,37 +192,73 @@ test.
 
 ### 4.2 Add them
 
-In Navigator, in `<OS>`:
+Before you start, record the number of content rows (§4.3), so that you can see what the
+uploads add.
 
-1. Create a folder `kasten-test`.
-2. Add `kasten-doc-1.txt`, `kasten-doc-2.txt` and `kasten-doc-3.txt` to it, with the default
-   document class. Set the **Document Title** to the file name.
-3. On `kasten-doc-1.txt`: **Check out**, then **Check in** `kasten-doc-1-v2.txt` as a new major
-   version. The document now has two versions with different content.
+In ACCE (or Navigator), in `<OS>`:
 
-You now have stores 2 and 3 populated: rows in the object store database, and — if the storage area
-is on a file system — four content files on a PVC (three documents, plus the second version).
+1. Create a folder `kasten-test`. In ACCE: **Browse → Root Folder**, open it, then
+   **Actions → New Folder**.
+2. Open `kasten-test`, then **Actions → New Document**. Add `kasten-doc-1.txt`,
+   `kasten-doc-2.txt` and `kasten-doc-3.txt`, with the default class `Document` and the option to
+   add content ticked. Set the **Document Title** to the file name.
+3. On `kasten-doc-1.txt`: **Actions → Checkin, checkout, cancel → Exclusive Checkout**, then
+   **Checkin…** with `kasten-doc-1-v2.txt` as a **major** version. To *check out* reserves the
+   document for a new version; to *check in* stores the new content as that version and keeps the
+   old one. The document now has two versions (1.0 and 2.0) with different content.
 
-### 4.3 Find the bytes on disk
+You now have four content elements: three documents, plus the second version of the first one.
+Each version has its own content, so a restore that brings back only the latest version has lost
+data.
 
-This proves where the content is, instead of assuming it. Find the CPE pod and the storage area
-root directory noted in §3:
+ACCE shows small files as **Size (KB): 0** — a 60-byte file rounds down. Use **Actions →
+View/Download…** to check that the content is there.
+
+### 4.3 Find the bytes
+
+This proves where the content is, instead of assuming it. Look in both places it can be: the
+object store database and the storage area volume. Run the commands before and after §4.2.
+
+**In the database.** A database storage area keeps each content element as one row of
+`content.content` (a `bytea` column). The schema is named after the object store: `content` for
+`CONTENT`. All FileNet schemas are in the database `cp4adb` of the PostgreSQL cluster
+`postgres-cp4ba`.
 
 ```bash
-CPE_POD=$(kubectl get pods -n ${CP4BA_NS} -o name | grep -- '-cpe-deploy-' | head -1)   # to be measured: the real name
-kubectl exec -n ${CP4BA_NS} ${CPE_POD} -- sh -c \
-  'grep -rl "kasten restore test document" <storage-area-root> 2>/dev/null'
+PG="kubectl exec -n ${CP4BA_NS} postgres-cp4ba-1 -c postgres -- psql -U postgres -d cp4adb"
+
+# number of content elements in the database storage area
+$PG -Atc "select count(*), pg_size_pretty(pg_total_relation_size('content.content')) from content.content"
+
+# the test documents: title, version, size — this is also the record for §4.4
+$PG -c "select u1708_documenttitle as title, major_version_number as maj,
+               minor_version_number as min, content_size
+        from content.docversion where u1708_documenttitle like 'kasten-%' order by 1,2"
 ```
 
-Expected: four files under `FN*/FN*/` subdirectories. If nothing is found, the content is in the
-database (a database storage area) — then look for it in the object store database instead (§5.2).
+The column `u1708_documenttitle` is the *Document Title* property. FileNet generates the prefix
+(`u1708_`) when the property is created, so check the name on your own object store
+(`\d content.docversion`).
 
-Then find which PVC that directory belongs to:
+**On the volume.** File storage areas live under `/opt/ibm/asa`, which is the PVC
+`cpe-filestore` (`asa` stands for *advanced storage area*):
 
 ```bash
-kubectl get ${CPE_POD} -n ${CP4BA_NS} -o jsonpath='{range .spec.containers[0].volumeMounts[*]}{.mountPath}{" <- "}{.name}{"\n"}{end}'
-kubectl get ${CPE_POD} -n ${CP4BA_NS} -o jsonpath='{range .spec.volumes[*]}{.name}{" <- "}{.persistentVolumeClaim.claimName}{"\n"}{end}'
+CPE_POD=$(kubectl get pods -n ${CP4BA_NS} -o name | grep -- '-cpe-deploy-' | head -1)
+kubectl exec -n ${CP4BA_NS} ${CPE_POD} -c icp4adeploy-cpe-deploy -- \
+  sh -c 'du -sh /opt/ibm/asa; find /opt/ibm/asa -type f; grep -rl "kasten restore test document" /opt/ibm/asa'
+
+# which PVC each mount path belongs to
+kubectl get ${CPE_POD} -n ${CP4BA_NS} -o json | jq -r '
+  (.spec.volumes | map({(.name): (.persistentVolumeClaim.claimName // null)}) | add) as $v
+  | .spec.containers[0].volumeMounts[] | select($v[.name]) | "\(.mountPath)\t\($v[.name])"'
 ```
+
+**Measured on Starter 26.0.0:** after §4.2, `content.content` went from 62 to **66** rows (one per
+content element, 60, 41, 60 and 60 bytes, matching `content_size` in `docversion`), and
+`/opt/ibm/asa` stayed at **2 KB**: one empty directory per object store with a `device.txt`, and
+no content file. The content is only in the database. A file storage area would instead show
+four files under `FN*/FN*/` subdirectories and no new rows in `content.content`.
 
 ### 4.4 The restore check
 
@@ -235,13 +276,12 @@ For each document in `kasten-test`, in Navigator or ACCE:
    also finds orphan files. *(To be measured: how to run it on CP4BA 26.0.0.)*
 
 A script is better than clicking, because it is repeated many times. Content Services GraphQL can
-list the documents and give a download URL for each content element. *(To be measured: the exact
-query on 26.0.0 — check the schema in the GraphiQL page at `/content-services-graphql` first.)*
-A starting point:
+list the documents and give a download URL for each content element. This query was run in the
+GraphiQL page (`/content-services-graphql`) on 26.0.0:
 
 ```graphql
 {
-  documents(repositoryIdentifier: "<OS>",
+  documents(repositoryIdentifier: "CONTENT",   # the object store's symbolic name (<OS>)
             where: "DocumentTitle LIKE 'kasten-doc-%'") {
     documents {
       id
@@ -255,19 +295,35 @@ A starting point:
 }
 ```
 
+Expected after §4.2: **four entries**. The query returns every version, not only the current one,
+so `kasten-doc-1.txt` appears twice — version 1 (`retrievalName` `kasten-doc-1.txt`, 60 bytes)
+and version 2 (`kasten-doc-1-v2.txt`, 41 bytes). Each entry has its own `id` and a `downloadUrl`
+such as `/content?repositoryIdentifier=CONTENT&documentId=<id>&elementSequenceNumber=0`. Downloading
+each one and comparing it with `checksums.txt` is the content check of step 2. *(To be measured:
+the base the `downloadUrl` is relative to — expected `/content-services-graphql` — and how a script
+authenticates outside the browser.)*
+
 ### 4.5 Changes the restore must undo
 
 Take the backup (or, in Step 3, the manual snapshots) **after** §4.2. Then:
 
 1. **Delete** `kasten-doc-2.txt`.
 2. **Add** a new document `kasten-doc-4.txt`.
-3. Wait a few minutes, then check on disk (§4.3) whether the content file of `kasten-doc-2.txt` has
-   gone. That shows how long the deletion queue takes (§2.3).
+3. Wait a few minutes, then check (§4.3) whether the content of `kasten-doc-2.txt` has gone: its
+   row in `content.content` for a database storage area, its file for a file storage area. That
+   shows how long the deletion queue takes (§2.3).
 
 After the restore, the check in §4.4 must pass, `kasten-doc-2.txt` must be back and open, and
 `kasten-doc-4.txt` must be gone.
 
 ### 4.6 Provoke the broken case once (Step 3 only)
+
+> **Not possible on the Starter layout as installed.** With a database storage area, the rows and
+> the content are in the same database, on one PVC (`postgres-cp4ba-1`). One snapshot captures
+> both at the same instant, so they cannot disagree, and there is no second volume to snapshot at
+> a different moment. The procedure below applies once a **file storage area** exists — the usual
+> production layout. To test it on Starter, add a file storage area to `<OS>` in ACCE, rooted
+> under `/opt/ibm/asa`, and make it the target of the `Document` class's storage policy.
 
 To be sure the check in §4.4 really detects a bad restore, produce one on purpose while validating
 the workflow by hand:
@@ -312,15 +368,20 @@ In the object store database, documents are expected in the `docversion` table a
 
 | Question | Answer |
 |---|---|
-| Object store name(s) | |
-| Storage area kind and root directory | |
-| Storage area PVC (name, size, class, access mode) | |
-| GCD database: cluster, database name, PVC | |
-| Object store database: cluster, database name, PVC | |
-| Navigator database: cluster, database name, PVC | |
-| Same PostgreSQL cluster as the ODM databases? | |
-| Other CPE / Navigator PVCs, and whether each is needed for restore | |
-| Delay before a deleted document's content file disappears | |
-| Does §4.6 produce the expected broken document? | |
+| Object store name(s) | `CONTENT` (documents), `DESIGN`, `DEVOS1`, `TARGET` |
+| Storage area kind and root directory | `CONTENT`: one *Database Storage Area*, no root directory. The class `Document` uses *Default Database Storage Policy*. The other three stores: not checked in ACCE, but their directories under `/opt/ibm/asa` are empty |
+| Storage area PVC (name, size, class, access mode) | None used. `cpe-filestore` (1 Gi, `ocs-storagecluster-cephfs`, RWX) is mounted at `/opt/ibm/asa` and holds only `device.txt` files (2 KB) |
+| GCD database: cluster, database name, PVC | `postgres-cp4ba`, database `cp4adb`, schema `gcduser`, PVC `postgres-cp4ba-1` |
+| Object store database: cluster, database name, PVC | Same database `cp4adb`, one schema per store: `content` (199 MB, content included), `devos1`, `os1user`, `os2user`. PVC `postgres-cp4ba-1` |
+| Navigator database: cluster, database name, PVC | Same database `cp4adb`, schema `icnuser`, PVC `postgres-cp4ba-1` |
+| Same PostgreSQL cluster as the ODM databases? | **No.** ODM has its own database server, `icp4adeploy-dbserver`, on the PVC `icp4adeploy-odm-pvclaim` |
+| Other CPE / Navigator PVCs, and whether each is needed for restore | IBM's 26.0.0 PVC list requires `cpe-filestore` and `icn-cfgstore` only. Measured content: `cpe-fnlogstore` 172 MB (logs and the `INSO` conversion libraries), `cpe-cfgstore` 12 MB (operator-generated Liberty configuration); `cpe-textextstore`, `cpe-icmrulesstore`, `cpe-logstore`, `cpe-bootstrapstore` empty |
+| Delay before a deleted document's content disappears | *(to be measured in §4.5)* |
+| Does §4.6 produce the expected broken document? | Not applicable on the Starter layout: rows and content are in one database on one PVC (see §4.6) |
+
+**Consequence for the backup.** On Starter, all of FileNet's state is on **one PVC**,
+`postgres-cp4ba-1`, plus `icn-cfgstore` and the Secrets. The consistency problem of §2.3 does not
+occur. It comes back with a file storage area or an S3 storage area, which a production
+deployment usually has, so the blueprint must not depend on the Starter layout.
 
 These answers are the input to Step 1 of the blueprint workflow: choosing the backup pattern.

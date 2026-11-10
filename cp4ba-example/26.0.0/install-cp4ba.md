@@ -99,7 +99,7 @@ depending on it.
 ### 2.1 CP4D is removed first
 
 The cluster previously ran IBM Software Hub (CP4D) 5.4.0 Patch 7, used by
-[cp4d-example](../cp4d-example/) and [datastage-example](../datastage-example/). It is removed
+[cp4d-example](../../cp4d-example/) and [datastage-example](../../datastage-example/). It is removed
 before CP4BA is installed. Remove it with IBM's procedure (*IBM Software Hub 5.4.x docs →
 Uninstalling*), and keep in mind:
 
@@ -328,6 +328,24 @@ whether the Starter object store keeps its content on a PVC or inside the databa
 ```bash
 kubectl get pvc -n ${CP4BA_NS} -o custom-columns=NAME:.metadata.name,SIZE:.spec.resources.requests.storage,CLASS:.spec.storageClassName,MODE:.spec.accessModes
 ```
+
+**OpenLDAP has no PVC.** Measured: the `icp4adeploy-openldap-deploy` pod keeps its database
+(`/var/lib/ldap`) and its configuration (`/etc/openldap/slapd.d`) in `emptyDir` volumes. At every
+start it rebuilds the directory from the LDIF in the Secret `icp4adeploy-openldap-customldif`,
+which the operator creates from the `ICP4ACluster` CR. So:
+
+- The backup protects the users through that Secret and the CR, which Kasten captures with the
+  other Kubernetes objects. No volume is needed.
+- A change made in LDAP itself (a new user, a changed password) is lost at the next pod restart,
+  with or without a restore. Starter's OpenLDAP is a demo directory, not a store of record.
+- To check: whether FileNet records users by DN or by a generated attribute such as `entryUUID`.
+  A generated attribute changes when the directory is rebuilt, so a restored document's access
+  control list would no longer match its users. The restore check in
+  [mini-tutorial-filenet.md §4.4](mini-tutorial-filenet.md#44-the-restore-check) shows it if it
+  happens.
+
+In production the directory is the customer's own LDAP, outside the cluster, and is not part of
+this backup.
 
 ### 5.3 Databases and what is in them
 

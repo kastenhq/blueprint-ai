@@ -233,7 +233,7 @@ kubectl get all,secret,configmap,pvc -n ${CP4BA_NS} -l cp4ba.ibm.com/backup-type
 | Decision Server database: cluster, database name, PVC | |
 | ODM pods mounting a PVC | |
 | Foundational Services / Zen database: cluster, PVC | |
-| OpenLDAP PVC | |
+| OpenLDAP PVC | None: `emptyDir`, rebuilt from the Secret `icp4adeploy-openldap-customldif` at every start (see [install-cp4ba.md §5.2](install-cp4ba.md#52-pvcs)) |
 | Objects labelled `cp4ba.ibm.com/backup-type` | |
 | Tables written by import (§4.1), deploy (§4.2), edit (§4.4) | |
 
