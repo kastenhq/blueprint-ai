@@ -609,7 +609,7 @@ The users and passwords are the ones of the backup, because LDAP is restored too
 | Routes | No change needed; `cpd`, Navigator, ACCE and Decision Center answer |
 | CPE health page | Domain `P8DOMAIN`, 4 object stores, 8 storage areas |
 | Logs | No database, LDAP, IAM or TLS error |
-| Documents | Not checked yet in Navigator against `checksums.txt` (§11) |
+| Documents | Checked in Navigator as `cp4admin` with the password from before the deletion: `kasten-doc-1.txt` at version 2, `kasten-doc-2.txt` and `kasten-doc-3.txt` present, `kasten-doc-4.txt` absent, as at the time of the backup |
 
 | Step | Duration |
 |---|---|
@@ -646,7 +646,6 @@ To remove CP4BA itself, see [install-cp4ba.md](install-cp4ba.md).
 | Topic | Status |
 |---|---|
 | **Restore with the procedure of §8.2** | The exported restore point with a PVC filter was tested into an empty namespace (28/28 PVCs), not yet as a restore into the running CP4BA with a data check |
-| **Document check after disaster recovery** | The workloads, Secrets, certificates and CPE health were checked (§9.5); the documents in Navigator were not compared with `checksums.txt` yet |
 | **Export with the shallow CephFS class** | The `exporterStorageClassName` override in [policy.yaml](policy.yaml) is applied and the policy validates; no backup has run with it yet |
 | **Disaster recovery on a new cluster** | Validated on the same cluster only (§9). A new cluster also needs IBM's cluster-scoped prerequisites (CRDs, cert-manager, IBM Licensing), without the namespace part of the install |
 | **ODM restore check** | The design treats ODM like FileNet (its state is in PostgreSQL, which is captured offline). The ODM check in [mini-tutorial-odm.md](mini-tutorial-odm.md) was not run |
