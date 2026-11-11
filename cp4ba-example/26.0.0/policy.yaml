@@ -1,0 +1,59 @@
+# Backup policy for the CP4BA namespace, with the offline/online action hooks.
+#
+# Replace <LOCATION_PROFILE> with a Location profile (S3, Azure Blob, GCS, ...), not an Infra
+# profile. The backup action needs it for the Kanister hooks; the export action sends the
+# snapshots to it.
+#
+# On the test cluster the policy was created from the Kasten dashboard and the hooks were added
+# afterwards; Kasten then also stores a generated migrationToken and receiveString under
+# exportParameters. You do not need to write those yourself.
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Policy
+metadata:
+  name: cp4ba-starter-backup
+  namespace: kasten-io
+spec:
+  comment: CP4BA offline backup (FileNet and ODM)
+  frequency: '@onDemand'          # or a schedule, for example '@daily'
+  selector:
+    matchExpressions:
+      - key: k10.kasten.io/appNamespace
+        operator: In
+        values:
+          - cp4ba-starter
+  actions:
+    - action: backup
+      backupParameters:
+        profile:
+          name: <LOCATION_PROFILE>
+          namespace: kasten-io
+        hooks:
+          # Before discovery and before any snapshot: stop everything in the namespace.
+          preHook:
+            blueprint: cp4ba-offline-bp
+            actionName: backupPrehook
+          # After the snapshots are complete: start everything again.
+          onSuccess:
+            blueprint: cp4ba-offline-bp
+            actionName: backupPosthook
+          # If the backup fails, including a failure of the preHook: start everything again.
+          onFailure:
+            blueprint: cp4ba-offline-bp
+            actionName: backupPosthookOnFailure
+    - action: export
+      exportParameters:
+        frequency: '@onDemand'
+        exportData:
+          enabled: true
+          # 18 of the 28 PVCs are CephFS. Kasten exports from a clone of each snapshot, and a
+          # CephFS clone is a full copy of every file. A storage class with
+          # backingSnapshot: "true" mounts the snapshot read-only instead, without a copy. See
+          # https://github.com/kastendevhub/enterprise-blueprint/tree/main/ceph/cephfs
+          # Remove this override if your cluster has no such class.
+          overrides:
+            - storageClassName: ocs-storagecluster-cephfs
+              enabled: true
+              exporterStorageClassName: ocs-storagecluster-cephfs-shallow
+        profile:
+          name: <LOCATION_PROFILE>
+          namespace: kasten-io

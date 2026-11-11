@@ -1,0 +1,74 @@
+# CP4BA offline backup — ACTION HOOK blueprint (policy level).
+#
+# Takes the whole CP4BA namespace offline before Kasten snapshots its PVCs, and brings it back
+# online afterwards. This is IBM's "offline backup" procedure: nothing writes to the databases or
+# to the FileNet storage areas while the snapshots are taken, so every PVC describes the same
+# moment.
+#
+# Designed and validated for the Content (FileNet) and Decisions (ODM) capabilities of a CP4BA
+# 26.0.0 Starter deployment. See README.md for the scope and its limits.
+#
+# Wired to the policy at spec.actions[backup].backupParameters.hooks:
+#   preHook:   { blueprint: cp4ba-offline-bp, actionName: backupPrehook }
+#   onSuccess: { blueprint: cp4ba-offline-bp, actionName: backupPosthook }
+#   onFailure: { blueprint: cp4ba-offline-bp, actionName: backupPosthookOnFailure }
+#
+# The actions run scripts/scale-down.sh and scripts/scale-up.sh, the same scripts an operator
+# runs by hand for a restore. They reach the hook pod through the ConfigMap
+# cp4ba-offline-scripts in kasten-io (see README.md §6.2), so the backup and the manual restore
+# can never run different code. The pod runs in kasten-io with Kasten's service account, which
+# can scale workloads and patch resources in the application namespace.
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: cp4ba-offline-bp
+  namespace: kasten-io
+actions:
+  backupPrehook:
+    phases:
+      - func: KubeTask
+        name: takeOffline
+        args:
+          namespace: kasten-io
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.10
+          podOverride: &scripts
+            volumes:
+              - name: scripts
+                configMap:
+                  name: cp4ba-offline-scripts
+                  defaultMode: 0555
+            containers:
+              - name: container
+                volumeMounts:
+                  - name: scripts
+                    mountPath: /scripts
+          command:
+            - bash
+            - /scripts/scale-down.sh
+            - "{{ .Namespace.Name }}"
+  backupPosthook:
+    phases:
+      - func: KubeTask
+        name: bringOnline
+        args:
+          namespace: kasten-io
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.10
+          podOverride: *scripts
+          command:
+            - bash
+            - /scripts/scale-up.sh
+            - "{{ .Namespace.Name }}"
+  # Runs when the backup fails, including when backupPrehook itself failed half-way: scale-up.sh
+  # only restarts what scale-down.sh recorded, so it is safe at any point.
+  backupPosthookOnFailure:
+    phases:
+      - func: KubeTask
+        name: bringOnline
+        args:
+          namespace: kasten-io
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.10
+          podOverride: *scripts
+          command:
+            - bash
+            - /scripts/scale-up.sh
+            - "{{ .Namespace.Name }}"
