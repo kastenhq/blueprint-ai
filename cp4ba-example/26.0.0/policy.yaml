@@ -45,6 +45,15 @@ spec:
         frequency: '@onDemand'
         exportData:
           enabled: true
+          # 18 of the 28 PVCs are CephFS. Kasten exports from a clone of each snapshot, and a
+          # CephFS clone is a full copy of every file. A storage class with
+          # backingSnapshot: "true" mounts the snapshot read-only instead, without a copy. See
+          # https://github.com/kastendevhub/enterprise-blueprint/tree/main/ceph/cephfs
+          # Remove this override if your cluster has no such class.
+          overrides:
+            - storageClassName: ocs-storagecluster-cephfs
+              enabled: true
+              exporterStorageClassName: ocs-storagecluster-cephfs-shallow
         profile:
           name: <LOCATION_PROFILE>
           namespace: kasten-io

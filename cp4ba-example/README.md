@@ -20,7 +20,7 @@ installation, and follow the `README.md` inside it.
 
 | CP4BA | Deployment type | Folder | OpenShift | Kasten | Status |
 |---|---|---|---|---|---|
-| 26.0.0-IF003 | Starter | [26.0.0/](26.0.0/) | 4.21.30 | 9.0.10 | Backup validated through Kasten; in-place restore validated by hand; disaster recovery not validated |
+| 26.0.0-IF003 | Starter | [26.0.0/](26.0.0/) | 4.21.30 | 9.0.10 | Backup validated through Kasten; restore and disaster recovery (namespace deleted, same cluster) validated by hand |
 
 A folder is a **record of what was validated** on that version. It is not updated when another
 version moves on. If your version is not listed, start from the nearest folder and re-run the

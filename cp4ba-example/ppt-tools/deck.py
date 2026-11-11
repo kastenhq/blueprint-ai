@@ -23,7 +23,8 @@ d.agenda([
     "What this protects, and what it does not",
     "The pattern: IBM's offline backup as a policy action hook",
     "What the backup does, step by step",
-    "Restore, and what the first restore taught us",
+    "Restore: bring the data back into a running CP4BA",
+    "Disaster recovery: bring the whole namespace back",
 ])
 
 d.hero(
@@ -60,8 +61,8 @@ d.cards(
         ('error_warning', "STARTER ONLY", [
             "Validated on a CP4BA Starter deployment on a test cluster.",
             "",
-            "Not validated on a production installation, and disaster recovery is not "
-            "validated yet.",
+            "Not validated on a production installation. Disaster recovery is "
+            "validated on the same cluster only.",
         ]),
     ], style='standard', body_size=11)
 
@@ -138,52 +139,66 @@ d.table_slide(
           "manual restore can never run different code."))
 
 d.steps_dark(
-    "Restore — by hand, in the same namespace",
-    "Only the PVCs come back",
+    "Restore — by hand, into a running CP4BA",
+    "Only the PVCs come back, from the exported restore point",
     [
         ('lock_security', "1. SCALE-DOWN.SH",
          "Take CP4BA offline. Kasten cannot replace a PVC that a pod still uses."),
-        ('history', "2. RESTORE THE PVCs ONLY",
-         "A data-only restore. CRs, Secrets and Deployments stay as they are, so the "
-         "operators never see a half-restored object."),
+        ('history', "2. RESTORE THE PVCs, EXPORTED POINT",
+         "Filter on persistentvolumeclaims, not 'data only': Kasten then replaces all 28 "
+         "PVCs. Never the local point: CephFS clones are full copies."),
         ('rocket_launch', "3. SCALE-UP.SH",
-         "Bring CP4BA online. It also repairs the PostgreSQL PVCs (next slide)."),
+         "Bring CP4BA online. It also gives the PostgreSQL PVCs their owner back."),
         ('search_eye', "4. OPEN THE DOCUMENTS",
          "Listing is not enough: download each test document and compare its checksum."),
     ])
 
-d.cards(
-    "What the first restore taught us",
-    "Each one stopped the restore; the scripts now handle all of them",
+d.flow(
+    "Disaster recovery — the namespace is gone",
+    "dr-restore.sh, from the exported restore point. Do not run IBM's install first: about 30 minutes",
     [
-        ('time_clock', "A CRONJOB EVERY 5 MINUTES", [
-            "icp4adeploy-rr-backup mounts a PVC. Its new pod kept the PVC from being "
-            "deleted, and the restore waited.",
+        ('settings', "NAMESPACE", "Created with the UID\nrange and SELinux\nlabel saved in the\nrestore point."),
+        ('cloud', "OPERATORS", "Restore the OLM\nobjects. OLM installs\nthe same 21 operator\nversions."),
+        ('lock_security', "OFFLINE", "scale-down.sh. Delete\nwhat the operators\ncreated by themselves,\na new CA first."),
+        ('history', "EVERYTHING ELSE", "PVCs, Secrets, CRs,\ncertificates, routes:\nall from the same\nmoment, offline."),
+        ('rocket_launch', "SCALE-UP.SH", "As after a backup.\nSame passwords, keys\nand certificates as\nbefore."),
+    ],
+    note="Installing CP4BA again and restoring only the PVCs was tried first: new UID range, "
+         "new passwords and keys, a reissued CA. Every installed object had to be replaced.")
+
+d.cards(
+    "What the disaster recovery taught us",
+    "Each one stopped the recovery; dr-restore.sh now handles all of them",
+    [
+        ('node_tree', "OLM STUCK", [
+            "Kasten restores the Subscriptions with their status. They point to "
+            "InstallPlans that no longer exist.",
             "",
-            "Fix: suspend every CronJob first.",
+            "Fix: remove the status and olm.generated-by.",
         ]),
-        ('checkbox_multiple', "A FINISHED POD STILL BLOCKS", [
-            "A pod in phase Succeeded still referenced the PVC, and that was enough to "
-            "keep it.",
+        ('error_warning', "WEBHOOKS", [
+            "PostgreSQL and CommonService webhooks reject new objects while their "
+            "operator is stopped.",
             "",
-            "Fix: delete the Jobs, finished ones too; check pods in every phase.",
+            "Fix: keep those two operators running during the restore.",
         ]),
-        ('database', "POSTGRESQL IS NOT A DEPLOYMENT", [
-            "IBM's EDB operator owns the pods. Scaling cannot stop them.",
+        ('lock_security', "OLM CERTIFICATES", [
+            "The backup's webhook certificates were signed by the first OLM install: "
+            "x509 unknown authority.",
             "",
-            "Fix: hibernate each cluster while its operator still runs.",
+            "Fix: never restore the *-service-cert Secrets.",
         ]),
-        ('node_tree', "RESTORED PVCs HAVE NO OWNER", [
-            "Kasten drops ownerReferences. The operator counted no PVC and called the "
-            "cluster unrecoverable. The data was intact.",
+        ('history', "CA REISSUED", [
+            "cert-manager reissues a certificate as soon as its Secret changes, with a "
+            "new key for the CA.",
             "",
-            "Fix: scale-up.sh puts the owner back.",
+            "Fix: no Certificate may exist before the restore.",
         ]),
     ], style='negative', body_size=10.5)
 
 d.table_slide(
     "Versions",
-    "Validated on 2026-11-10: the deleted test document came back, opened, and matched its checksum",
+    "Restore validated on 2026-11-10, disaster recovery on 2026-11-11 (same cluster)",
     ["Component", "Version"],
     [
         ("OpenShift / Kubernetes", "4.21.30 / 1.34.9"),
@@ -196,8 +211,8 @@ d.table_slide(
     col_widths=[2.7, 3.15],
     row_heights=[0.5] + [0.52] * 6,
     side=('error_warning', "NOT VALIDATED YET",
-          "Disaster recovery: delete the namespace, install CP4BA again, restore. "
-          "This is the next step.\n"
+          "Disaster recovery on a new cluster: it also needs IBM's cluster-scoped "
+          "prerequisites.\n"
           "The ODM restore check.\n"
           "A production deployment, with external databases, several replicas and "
           "other capabilities."))
