@@ -397,6 +397,58 @@ commit.
 
 Do not assume that the base image contains jq, yq or kubectl, most of the time you have to add them.
 
+#### Keep scripts in a ConfigMap, not in the image
+
+When a blueprint's logic is more than a few lines of shell, put the scripts in a ConfigMap in
+`kasten-io`, not in the image. **The image provides the tools only** (`kubectl`, `jq`, the
+workload's CLI); the logic lives in `<blueprint-dir>/scripts/` and reaches the pods through the
+ConfigMap.
+
+**Why:** a script baked into an image can only be changed by bumping `IMAGE_REVISION`, waiting for
+CI, and getting the change reviewed — while a customer waits. A script in a ConfigMap is changed with
+one `kubectl apply`, and anyone can read what will run with `kubectl get configmap -o yaml`. It makes
+the blueprint easier to change and to audit on the cluster.
+
+```bash
+kubectl create configmap <app>-scripts -n kasten-io --from-file=scripts/ \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+```yaml
+- func: KubeTask
+  args:
+    namespace: kasten-io
+    image: <tools image>
+    podOverride:
+      volumes:
+        - name: scripts
+          configMap: { name: <app>-scripts, defaultMode: 0755 }
+      containers:
+        - name: container        # the KubeTask container is always named "container"
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts }
+    command: [bash, -c, '/scripts/backup.sh "{{ .Namespace.Name }}"']
+```
+
+Rules that go with it:
+
+1. **A pod cannot mount a ConfigMap from another namespace.** If the blueprint launches pods in the
+   application namespace, the script running in `kasten-io` copies the ConfigMap there first, and
+   those pods mount the copy. Never edit the copy; it is overwritten on every run.
+2. **Scripts call each other by path** (`"$(dirname "$0")/login.sh"`), not through `PATH`: the
+   image no longer has them in `/usr/local/bin`.
+3. **Log a fingerprint of the scripts that ran** as the first line
+   (`cat /scripts/*.sh | sha256sum | cut -c1-12`). The ConfigMap is not frozen the way an image tag
+   is, so this line is how you tie a run to a version of `scripts/` in git.
+4. **The output appears in the `kanister-svc` log**, in the `Pod_Out` field, not in the executor log.
+5. This applies to `KubeTask` and to pods the blueprint creates. With `KubeExec` the command runs in
+   a container the blueprint does not define, so it cannot mount a ConfigMap; keep those commands
+   short and inline.
+
+Verified on Kasten `9.0.10`: a KubeTask mounted the ConfigMap through `podOverride`, and after a
+`kubectl apply` of a changed ConfigMap the next `RunAction` ran the new script, with the blueprint
+and the image unchanged. See [cp4d-example/5.4](cp4d-example/5.4/).
+
 #### Shared versus blueprint-local: the same rule everywhere
 
 The Dockerfile rule above — one canonical copy at the repo root for anything shared, a
