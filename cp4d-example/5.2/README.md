@@ -34,7 +34,7 @@ into a namespace, and recreate the projects with a script.
         │            └──────────┬────────────┘                         │
         │ runs orchestrate.sh              reads cred secret           │ one export pod per project
         │ (KubeTask in kasten-io,          cross-namespace (RBAC)      │ (keeper SA), writes the
-        │  cluster-wide Kasten SA)  ───────────────────────────────────┘ UNZIPPED cpdctl export to /backup/current
+        │  cluster-wide Kasten SA)  ───────────────────────────────────┘ cpdctl export zip to /backup/current
         ▼
   enumerate projects → ensure PVC per project → launch export pods → wait → prune → cleanup pods
 ```
@@ -49,8 +49,19 @@ unit of granularity = unit of multi-tenant restore**.
 - **Permanent, GUID-keyed PVCs** (`cp4d-<sanitized-name>-<short-guid>`), created-if-missing and
   refreshed every run, pruned when a project is deleted. Permanence lets CSI block-level
   incremental dedup work across backups.
-- **Store the export UNZIPPED** (not the zip) so a one-cell change only rewrites one file and the
-  ~70% constant schema mass dedups across snapshots.
+- **Store the export zip as is** (`/backup/current/export.zip`), and give it back to CP4D unchanged
+  at restore (`cpdctl asset import start --import-file`). Earlier versions extracted the zip so that
+  a small change rewrote only one file. We stopped: the zip is produced by the CP4D export service,
+  its content is IBM's format, and CP4D 5.4 puts **the same entry twice** in one zip (for every
+  Watson Pipelines pipeline, `assets/.METADATA/orchestration_flow.<id>.json`). `unzip` then stops on
+  an interactive `replace ...?` prompt and the export fails. The same scripts as the 5.4 folder are
+  used here, so a 5.2 installation is protected against the same problem. The cost: a zip is
+  compressed, so any change in the project changes most of its bytes, and each snapshot and each
+  export to object storage holds about the full size of the zip. This has not been measured.
+- **The scripts are not in the image.** They are in [scripts/](scripts/) and reach the pods through
+  the ConfigMap `cp4d-backup-scripts` in `kasten-io`. A script fix during troubleshooting is one
+  `kubectl apply`, with no image rebuild and no new image tag. The image only provides the tools
+  (`cpdctl`, `kubectl`, `jq`).
 - **Restore is decoupled from Kasten restore hooks** — a standalone [restore.sh](restore.sh) does
   the `cpdctl import`. Robust, and it fits the multi-tenant / mass-migration story.
 - **Credentials never fan out**: the CP4D API key lives in a Secret in the CP4D instance namespace (`cpd` by default; NOT
@@ -70,7 +81,7 @@ Detected on the cluster where this blueprint was developed and tested.
 | Kasten | 8.5.12 (Helm `k10-8.5.12`) |
 | Cloud Pak for Data / IBM Software Hub | 5.2.x (Watson Studio `ws` 11.2.0) |
 | cpdctl | 1.8.244 |
-| Keeper image | `ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.2-r4` (built from [images/cp4d-backup/](images/cp4d-backup/); `-r3` and earlier did not pass `CRED_NS` / `CRED_SECRET` to the export pods, so they read the credential Secret from `cpd` whatever the blueprint set) |
+| Keeper image | `ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.2-r5` (built from [images/cp4d-backup/](images/cp4d-backup/); tools only. `-r4` and earlier had the scripts inside the image; `-r3` and earlier did not pass `CRED_NS` / `CRED_SECRET` to the export pods, so they read the credential Secret from `cpd` whatever the blueprint set) |
 
 Detect your Kasten version:
 
@@ -87,11 +98,12 @@ helm ls -n kasten-io                 # Helm
 |---|---|
 | [blueprint.yaml](blueprint.yaml) | The action blueprint (`backupPrehook`) |
 | [restore.sh](restore.sh) | Host-run restore: recreate a project from a restored PVC |
-| [images/cp4d-backup/Dockerfile](images/cp4d-backup/Dockerfile) | Keeper image (cpdctl + kubectl + jq + unzip) |
-| [images/cp4d-backup/orchestrate.sh](images/cp4d-backup/orchestrate.sh) | Backup orchestrator (enumerate → export pods → prune) |
-| [images/cp4d-backup/export-project.sh](images/cp4d-backup/export-project.sh) | Per-project export → unzip atomically to PVC |
-| [images/cp4d-backup/import-project.sh](images/cp4d-backup/import-project.sh) | Import a bundle from a restored PVC |
-| [images/cp4d-backup/cpdctl-login.sh](images/cp4d-backup/cpdctl-login.sh) | Headless cpdctl auth (env creds or cross-ns secret) |
+| [images/cp4d-backup/Dockerfile](images/cp4d-backup/Dockerfile) | Keeper image, tools only (cpdctl + kubectl + jq) |
+| [scripts/](scripts/) | The scripts, loaded into the `cp4d-backup-scripts` ConfigMap ([Prerequisite 1b](#1b-load-the-scripts-configmap)) |
+| [scripts/orchestrate.sh](scripts/orchestrate.sh) | Backup orchestrator (enumerate → export pods → prune) |
+| [scripts/export-project.sh](scripts/export-project.sh) | Per-project export → store the zip atomically on the PVC |
+| [scripts/import-project.sh](scripts/import-project.sh) | Import the zip from a restored PVC |
+| [scripts/cpdctl-login.sh](scripts/cpdctl-login.sh) | Headless cpdctl auth (env creds or cross-ns secret) |
 | [DESIGN.md](../DESIGN.md) | The rationale: why the API path, pattern mapping, what export captures |
 | [DESIGN.pptx](../DESIGN.pptx) | The same rationale as a deck — one slide per DESIGN.md section, full section text in the speaker notes (open with PowerPoint; Keynote refuses the import) |
 | [tools/build-design-deck.py](../tools/build-design-deck.py) | Regenerates `DESIGN.pptx` from `DESIGN.md` (`pip install python-pptx`) |
@@ -128,18 +140,40 @@ helm ls -n kasten-io                 # Helm
 ### 1. Build the keeper image
 
 The blueprint and restore both use one self-contained image (Dockerfile committed at
-[images/cp4d-backup/](images/cp4d-backup/)): Debian slim + `cpdctl` + `kubectl` + `jq` + `unzip`,
-with the four orchestration scripts baked in. Runs as an arbitrary (OpenShift-assigned) UID; the
+[images/cp4d-backup/](images/cp4d-backup/)): Debian slim + `cpdctl` + `kubectl` + `jq` (and
+`unzip`, only to inspect a bundle by hand). The scripts are **not** in the image (see 1b). Runs as an arbitrary (OpenShift-assigned) UID; the
 cpdctl config is rendered to a tmpfs path at runtime and never persisted.
 
 ```bash
 cd images/cp4d-backup
-docker buildx build --platform linux/amd64 -t <your-registry>/cp4d-backup:5.2-r4 --push .
+docker buildx build --platform linux/amd64 -t <your-registry>/cp4d-backup:5.2-r5 --push .
 ```
 
 > Use an **immutable tag** (or `imagePullPolicy: Always`, which the pod specs already set). A reused
 > mutable tag can leave stale layers cached on some nodes → `executable ... not found` errors.
 > Update the image reference in [blueprint.yaml](blueprint.yaml) and [restore.sh](restore.sh).
+
+### 1b. Load the scripts ConfigMap
+
+The blueprint and `restore.sh` run the scripts from the ConfigMap `cp4d-backup-scripts` in
+`kasten-io`. Create it from the [scripts/](scripts/) folder:
+
+```bash
+kubectl create configmap cp4d-backup-scripts -n kasten-io --from-file=scripts/ \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Run the same command again after **any** change to a script. The next backup uses the new version;
+there is no image to rebuild. Each backup copies the ConfigMap into `cp4d-projects-backup`, because a
+pod cannot mount a ConfigMap from another namespace; do not edit that copy, it is overwritten.
+
+The first line of the `backupPrehook` log names the version that ran:
+
+```
+scripts from ConfigMap kasten-io/cp4d-backup-scripts: sha256 3f1c0a9e5b27
+```
+
+Compare it with your local folder: `cat scripts/*.sh | sha256sum | cut -c1-12`.
 
 ### 2. CP4D credentials — the `cpadmin` API key in the CP4D instance namespace
 
@@ -181,7 +215,7 @@ the backed-up namespace, so it is never captured in a restore point.
 > These are two separate authorization systems: a **role** bundles *platform* permissions (what you
 > may do to the cluster), while **project membership** is a per-project entry governing access to
 > that project's *data*. That third row is what lets the blueprint bridge them —
-> [orchestrate.sh](images/cp4d-backup/orchestrate.sh) enumerates every project and **enrols itself
+> [orchestrate.sh](scripts/orchestrate.sh) enumerates every project and **enrols itself
 > as editor on any it is not already a member of**, before exporting anything. A project nobody
 > granted it access to is repaired rather than silently skipped, and if enrolment fails the whole
 > backup fails loudly (before any data moves) rather than quietly omitting that project.
@@ -192,7 +226,7 @@ the backed-up namespace, so it is never captured in a restore point.
 > stay untouched, this blueprint is not currently able to exclude them.
 
 **The keeper authenticates with the API key alone — never a password.**
-[cpdctl-login.sh](images/cp4d-backup/cpdctl-login.sh) runs
+[cpdctl-login.sh](scripts/cpdctl-login.sh) runs
 `cpdctl config user set svc --username … --apikey …`, and the Secret holds only `url`, `username`,
 `apikey` and `uid`. The `cpadmin` password is used once, on your workstation, to obtain the key; it
 is never stored in the backup namespace.
@@ -302,7 +336,7 @@ unset SVC_PW TOKEN APIKEY
 > `dap-admin-users`, which applies only to the `core` context). It was not taken from the IBM docs.
 
 Verify the Secret is usable before deploying anything else. This mirrors exactly what
-[cpdctl-login.sh](images/cp4d-backup/cpdctl-login.sh) does inside the keeper — it reads the same
+[cpdctl-login.sh](scripts/cpdctl-login.sh) does inside the keeper — it reads the same
 three keys (`url`, `username`, `apikey`) and runs the same two `cpdctl config` commands:
 
 ```bash
@@ -330,7 +364,7 @@ three keys (`url`, `username`, `apikey`) and runs the same two `cpdctl config` c
 ### Coverage is handled by the blueprint
 
 You do **not** need to add `cpadmin` to each project by hand.
-[orchestrate.sh](images/cp4d-backup/orchestrate.sh) does it on every run: it enumerates all
+[orchestrate.sh](scripts/orchestrate.sh) does it on every run: it enumerates all
 projects, lists the ones it is already an editor on, and enrols itself on the difference before
 launching any export pod. Validated end-to-end on 2026-08-07 — a keeper that was an editor on **0**
 projects enrolled itself on a freshly created project and exported it (145 KB bundle).
@@ -481,7 +515,7 @@ The hook attaches at `spec.actions[].backupParameters.hooks.preHook` = `{bluepri
 
 | Action | Trigger | What it does |
 |---|---|---|
-| `backupPrehook` | Before Kasten's PVC discovery/snapshot | Runs `orchestrate.sh`: authenticates cpdctl (cross-ns secret), enumerates **all** CP4D analytics projects, **enrols itself as editor on any project it is not already a member of** (aborting before any data moves if that fails), ensures one permanent GUID-keyed PVC per project, launches one export pod per project (bounded concurrency, one retry, atomic unzip to `/backup/current`), prunes PVCs of deleted projects, deletes export pods so nothing sensitive is captured. Exits non-zero (fails the whole backup) if any project fails to enrol or export. |
+| `backupPrehook` | Before Kasten's PVC discovery/snapshot | Runs `orchestrate.sh` from the `cp4d-backup-scripts` ConfigMap, after copying that ConfigMap into the backup namespace for the export pods: authenticates cpdctl (cross-ns secret), enumerates **all** CP4D analytics projects, **enrols itself as editor on any project it is not already a member of** (aborting before any data moves if that fails), ensures one permanent GUID-keyed PVC per project, launches one export pod per project (bounded concurrency, one retry; each pod stores the export zip atomically in `/backup/current/export.zip` and flushes the filesystem; a failed pod is detected at once, not after `EXPORT_TIMEOUT`), prunes PVCs of deleted projects, deletes export pods so nothing sensitive is captured. Exits non-zero (fails the whole backup) if any project fails to enrol or export. |
 
 > There is **no restore action in the blueprint**. Restore is deliberately handled by the
 > standalone [restore.sh](restore.sh), not a Kasten restore hook — more robust and a better fit for
@@ -544,6 +578,8 @@ CRED_NS="${CPD_NS}" ./restore.sh john-cp4d-restore cp4d-my-new-project-21a0ff72 
   [Get `cpdctl` on your workstation](#1-get-cpdctl-on-your-workstation); or point `CPDCTL` at your
   own binary). It reads the CP4D credentials straight from the Secret in `CRED_NS`, so no profile setup is
   needed.
+- It copies the `cp4d-backup-scripts` ConfigMap from `kasten-io` into `<namespace>` and runs
+  `import-project.sh` from it, so the restore uses the scripts currently in `kasten-io`.
 
 ### Guard rail (recommended)
 
@@ -682,6 +718,20 @@ kubectl get restorepoint -n cp4d-projects-backup
 ./bin/cpdctl asset search --project-id <new-pid> --type-name data_asset --query '*:*'
 ```
 
+**Image `5.2-r5` (zip stored as is, scripts in a ConfigMap, fail-fast wait): not run end to end
+on CP4D 5.2.** The change was validated end to end on CP4D 5.4.0 on 2026-11-18 (see the 5.4
+folder). The scripts in [scripts/](scripts/) are the same files, except `cpdctl-login.sh`, which
+keeps the `--apikey` login of `cpdctl` 1.8.244. What was checked for 5.2:
+
+| Check | Result |
+|---|---|
+| `cpdctl` 1.8.244 has `asset import start --import-file` | Yes (mutually exclusive with `--import-dir`) |
+| `cpdctl` 1.8.244 export, then import with `--import-file`, against CP4D 5.4.0 | `State: completed`. The zip had a duplicate `orchestration_flow` entry, and the project came back with its DataStage flow, job, pipeline and data asset |
+| ConfigMap mount, ConfigMap copy, fail-fast wait | Do not depend on the CP4D version; validated on 5.4 |
+
+Not checked: a CP4D 5.2 server receiving the zip with `--import-file`. Before you rely on this
+folder, run one backup and one restore (Steps 2–5 of [AGENTS.md](../../AGENTS.md)).
+
 **Validated end-to-end on 2026-07-10** (Kasten 8.5.12 / CP4D 5.2.x): backup produced one PVC per
 project, all CSI-snapshotted into one restore point; a granular cross-namespace restore of a single
 PVC + `restore.sh` recreated the project with its notebook, job, file data asset, connected data
@@ -812,6 +862,7 @@ Teardown of this blueprint's resources:
 # policy + blueprint
 kubectl delete policy cp4d-projects-backup-policy -n kasten-io
 kubectl delete blueprint cp4d-projects-backup-bp -n kasten-io
+kubectl delete configmap cp4d-backup-scripts -n kasten-io
 
 # backup namespace (per-project PVCs + snapshots) and restore namespaces
 kubectl delete ns cp4d-projects-backup

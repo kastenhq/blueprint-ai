@@ -26,7 +26,9 @@ WANT_NAME="${3:-}"
 
 CRED_NS="${CRED_NS:-cpd}"
 CRED_SECRET="${CRED_SECRET:-cp4d-backup-cpdctl-creds}"
-IMAGE="${IMAGE:-ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.2-r4}"
+IMAGE="${IMAGE:-ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.2-r5}"
+SCRIPTS_CM="${SCRIPTS_CM:-cp4d-backup-scripts}"   # the scripts ConfigMap (see README)
+SCRIPTS_NS="${SCRIPTS_NS:-kasten-io}"
 ENCRYPTION_KEY="${ENCRYPTION_KEY:-}"
 CPDCTL="${CPDCTL:-$(dirname "$0")/bin/cpdctl}"
 
@@ -83,6 +85,13 @@ rm -f /tmp/restore-create.$$
 [ -n "$NEWPID" ] || { echo "failed to create target project"; exit 1; }
 echo "created project $NEWPID"
 
+# --- copy the scripts ConfigMap into NS (a pod cannot mount one from another namespace) ---
+kubectl get configmap "$SCRIPTS_CM" -n "$SCRIPTS_NS" -o json \
+  | jq --arg ns "$NS" '{apiVersion, kind, data,
+        metadata: {name: .metadata.name, namespace: $ns,
+                   labels: {"app.kubernetes.io/managed-by": "cp4d-projects-backup"}}}' \
+  | kubectl apply -f - >/dev/null
+
 # --- import the bundle from the PVC via a pod (only a pod can mount the PVC) ---
 POD="cp4d-restore-import-$$"
 kubectl delete pod "$POD" -n "$NS" --ignore-not-found >/dev/null 2>&1
@@ -98,17 +107,21 @@ spec:
     - name: import
       image: $IMAGE
       imagePullPolicy: Always
-      command: ["import-project.sh"]
+      command: ["/scripts/import-project.sh"]
       env:
         - { name: TARGET_PID,     value: "$NEWPID" }
         - { name: ENCRYPTION_KEY, value: "$ENCRYPTION_KEY" }
         - { name: CPD_URL,        value: "$CPD_URL" }
         - { name: CPD_USERNAME,   value: "$CPD_USER" }
         - { name: CPD_APIKEY,     value: "$CPD_APIKEY" }
-      volumeMounts: [ { name: backup, mountPath: /backup } ]
+      volumeMounts:
+        - { name: backup,  mountPath: /backup }
+        - { name: scripts, mountPath: /scripts }
   volumes:
     - name: backup
       persistentVolumeClaim: { claimName: $PVC }
+    - name: scripts
+      configMap: { name: $SCRIPTS_CM, defaultMode: 0755 }
 EOF
 echo "importing (pod $POD) ..."
 kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$POD" -n "$NS" --timeout=600s >/dev/null 2>&1 || true

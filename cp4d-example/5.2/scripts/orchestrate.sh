@@ -9,6 +9,10 @@
 # bundle into that PVC. It then prunes PVCs of deleted projects and deletes the export
 # pods (so no export pod — and no credential — is captured in the restore point).
 #
+# The scripts are NOT in the image: they come from the ConfigMap $SCRIPTS_CM in
+# $SCRIPTS_NS (kasten-io), mounted by the blueprint. A pod cannot mount a ConfigMap from
+# another namespace, so this script copies it into $BACKUP_NS for the export pods.
+#
 # Exit non-zero (=> the whole backup fails) if any project could not be enrolled or exported.
 set -euo pipefail
 : "${BACKUP_NS:?BACKUP_NS is required}"
@@ -17,7 +21,9 @@ set -euo pipefail
 : "${KEEPER_SA:=cp4d-backup-keeper}"
 : "${PVC_SIZE:=1Gi}"
 : "${MAX_PARALLEL:=4}"
-: "${EXPORT_TIMEOUT:=900s}"
+: "${EXPORT_TIMEOUT:=900}"
+: "${SCRIPTS_CM:=cp4d-backup-scripts}"
+: "${SCRIPTS_NS:=kasten-io}"
 : "${ENCRYPTION_KEY:=}"
 : "${CRED_NS:=cpd}"
 : "${CRED_SECRET:=cp4d-backup-cpdctl-creds}"
@@ -29,12 +35,26 @@ set -euo pipefail
 #   KEEPER_SA       ServiceAccount the export pods run as (must have RBAC in BACKUP_NS)
 #   PVC_SIZE        size requested for each per-project PVC
 #   MAX_PARALLEL    max export pods running concurrently
-#   EXPORT_TIMEOUT  per-pod wait timeout (kubectl wait --timeout value)
+#   EXPORT_TIMEOUT  max seconds to wait for one export pod (a trailing "s" is accepted)
+#   SCRIPTS_CM      ConfigMap holding these scripts (copied into BACKUP_NS for the export pods)
+#   SCRIPTS_NS      namespace of that ConfigMap (the blueprint mounts it from there)
 #   ENCRYPTION_KEY  optional; passed to export-project.sh (empty => plaintext bundle)
 #   CRED_NS         namespace holding the credential secret (read cross-namespace)
 #   CRED_SECRET     name of that secret (keys: url, username, apikey, uid)
 
-cpdctl-login.sh   # authenticate cpdctl from the cross-namespace credential secret
+HERE="$(cd "$(dirname "$0")" && pwd)"
+# Print a short fingerprint of the scripts that are running: when a fix is applied by
+# updating the ConfigMap, this line in the log shows which version actually ran.
+echo "scripts from ConfigMap ${SCRIPTS_NS}/${SCRIPTS_CM}: sha256 $(cat "$HERE"/*.sh | sha256sum | cut -c1-12)"
+
+# Copy the scripts ConfigMap into BACKUP_NS, where the export pods run.
+kubectl get configmap "${SCRIPTS_CM}" -n "${SCRIPTS_NS}" -o json \
+  | jq --arg ns "${BACKUP_NS}" '{apiVersion, kind, data,
+        metadata: {name: .metadata.name, namespace: $ns,
+                   labels: {"app.kubernetes.io/managed-by": "cp4d-projects-backup"}}}' \
+  | kubectl apply -f - >/dev/null
+
+"$HERE/cpdctl-login.sh"   # authenticate cpdctl from the cross-namespace credential secret
 
 # --- the keeper's own identity, needed to add itself as a project member -------------
 # CP4D requires BOTH user_name and the numeric uid in a member payload (user_name alone
@@ -160,30 +180,40 @@ spec:
     - name: export
       image: ${IMAGE}
       imagePullPolicy: Always
-      command: ["export-project.sh"]
+      command: ["/scripts/export-project.sh"]
       env:
         - { name: PID,            value: "${pid}" }
         - { name: PROJECT_NAME,   value: "${name}" }
         - { name: ENCRYPTION_KEY, value: "${ENCRYPTION_KEY}" }
         - { name: CRED_NS,        value: "${CRED_NS}" }       # else cpdctl-login.sh falls back to "cpd"
         - { name: CRED_SECRET,    value: "${CRED_SECRET}" }
-      volumeMounts: [ { name: backup, mountPath: /backup } ]
+      volumeMounts:
+        - { name: backup,  mountPath: /backup }
+        - { name: scripts, mountPath: /scripts }
   volumes:
     - name: backup
       persistentVolumeClaim: { claimName: ${pvc} }
+    - name: scripts
+      configMap: { name: ${SCRIPTS_CM}, defaultMode: 0755 }
 EOF
   echo "  launched ${podname} -> pvc ${pvc}"
 }
 
 # wait_pod PODNAME  -> 0 if the pod reached phase=Succeeded, 1 otherwise
-#   Blocks up to EXPORT_TIMEOUT. On failure prints the phase and the last few
-#   log lines (indented) for diagnosis. Never itself aborts the script (the
-#   `kubectl wait` failure is swallowed), so the caller decides how to react.
+#   Returns as soon as the pod is Succeeded OR Failed, or after EXPORT_TIMEOUT
+#   seconds. (`kubectl wait --for=...=Succeeded` is not used: it cannot stop on
+#   Failed, so a pod that failed in 5 seconds would block the batch for the whole
+#   timeout.) On failure prints the phase and the last few log lines (indented).
+#   Never itself aborts the script, so the caller decides how to react.
 wait_pod(){ # podname -> 0 ok / 1 fail
-  local p="$1" ph
-  kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/${p}" -n "${BACKUP_NS}" \
-    --timeout="${EXPORT_TIMEOUT}" >/dev/null 2>&1 || true
-  ph=$(kubectl get pod "${p}" -n "${BACKUP_NS}" -o jsonpath='{.status.phase}' 2>/dev/null || echo Unknown)
+  local p="$1" ph deadline
+  deadline=$(( $(date +%s) + ${EXPORT_TIMEOUT%s} ))
+  while :; do
+    ph=$(kubectl get pod "${p}" -n "${BACKUP_NS}" -o jsonpath='{.status.phase}' 2>/dev/null || echo Unknown)
+    case "${ph}" in Succeeded|Failed) break ;; esac
+    [ "$(date +%s)" -ge "${deadline}" ] && { ph="${ph} (timeout after ${EXPORT_TIMEOUT%s}s)"; break; }
+    sleep 5
+  done
   [ "${ph}" = Succeeded ] && return 0
   echo "  !! ${p} phase=${ph}"
   kubectl logs "${p}" -n "${BACKUP_NS}" --tail=8 2>/dev/null | sed 's/^/     /'

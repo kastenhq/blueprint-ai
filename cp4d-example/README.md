@@ -14,13 +14,17 @@ folder that matches your installation, and follow the `README.md` inside it.
 
 | CP4D / IBM Software Hub | Folder | OpenShift | Kasten | Keeper image |
 |---|---|---|---|---|
-| 5.4.0 Patch 7 | [5.4/](5.4/) | 4.21.30 | 9.0.7 | `cp4d-backup:5.4-r2` |
-| 5.2.x | [5.2/](5.2/) | 4.18.6 | 8.5.12 | `cp4d-backup:5.2-r4` |
-| 4.8.9 | [4.8/](4.8/) | 4.18.56 | 9.0.8 | `cp4d-backup:4.8-r2` |
+| 5.4.0 Patch 7 | [5.4/](5.4/) | 4.21.30 | 9.0.11 | `cp4d-backup:5.4-r3` |
+| 5.2.x | [5.2/](5.2/) | 4.18.6 | 8.5.12 | `cp4d-backup:5.2-r5` |
+| 4.8.9 | [4.8/](4.8/) | 4.18.56 | 9.0.8 | `cp4d-backup:4.8-r3` |
 
 A folder is a **snapshot of what was validated** on that version. It is not updated when another
 version moves on. If your version is not listed, start from the nearest folder and re-run the
 validation (Steps 2–5 of [AGENTS.md](../AGENTS.md)) before you rely on it.
+
+One exception: on 2026-11-18 the 5.2 and 4.8 folders received the 5.4 fix (export zip stored as
+is, scripts in a ConfigMap, fail-fast wait) without an end-to-end run on CP4D 5.2 or 4.8. Each of
+those READMEs says what was checked and what was not.
 
 CP4D 4.8 is out of IBM support since 31 July 2025; the 4.8 folder exists for installations that
 have not upgraded yet.

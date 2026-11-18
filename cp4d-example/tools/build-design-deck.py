@@ -319,7 +319,7 @@ dy = fy + In(1.06)
 txbox(s, M, dy, CW, In(0.22), "DECISIONS THAT FOLLOW", size=10, bold=True, color=MUTED)
 dy += In(0.3)
 dec = [("Permanent GUID-keyed PVCs", "so CSI block-level dedup works across runs"),
-       ("Store the export UNZIPPED", "a zip is opaque to dedup; one cell edit = one file"),
+       ("Store the export zip as is", "IBM's format; CP4D 5.4 puts duplicate entries in it"),
        ("Restore decoupled from Kasten hooks", "a standalone script fits multi-tenant restore"),
        ("Credentials outside the backed-up ns", "never captured in any restore point")]
 dwe = (CW - In(3 * 0.2)) / 4
@@ -380,9 +380,9 @@ txbox(s, M + In(0.14), by + In(0.16), seg1 - In(0.28), In(0.3),
 txbox(s, M + seg1 + In(0.2), by + In(0.16), seg2 - In(0.3), In(0.3),
       "the payload   ~30%", size=12.5, bold=True, color=WHITE)
 txbox(s, M, by + bh + In(0.12), CW, In(0.6),
-      "Schema overhead is roughly **constant regardless of content** — which is exactly why the "
-      "bundle is stored **unzipped**: a one-cell edit rewrites one file, and the constant schema "
-      "mass dedups across snapshots instead of being re-shipped inside a fresh archive.",
+      "Schema overhead is roughly **constant regardless of content**. The first versions stored "
+      "the bundle **extracted** so this mass would dedup across snapshots; the zip is now stored "
+      "**as is**, because CP4D 5.4 writes duplicate entries in it and `unzip` fails on them.",
       size=12, color=INK2, line=1.15)
 # the three layers
 ly = by + bh + In(0.8)

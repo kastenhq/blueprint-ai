@@ -93,12 +93,12 @@ d.cards(
             "The GUID rather than the name is what makes a renamed project keep its "
             "history instead of starting a new PVC.",
         ]),
-        ('speed_up', "STORE THE EXPORT UNZIPPED", [
-            "Not the zip. A one-cell change then rewrites one file rather than the "
-            "whole archive.",
+        ('speed_up', "STORE THE EXPORT ZIP AS IS", [
+            "The zip is IBM's format. CP4D 5.4 writes each pipeline's metadata twice "
+            "in it, and unzip stops on that.",
             "",
-            "That is what lets Kasten's content-addressed export deduplicate between "
-            "runs — a zip would change wholesale every time.",
+            "cpdctl imports the zip unchanged. The cost: each backup stores about the "
+            "full zip, not only what changed.",
         ]),
         ('loop_left', "RESTORE IS DECOUPLED", [
             "A standalone restore.sh does the work, rather than a Kasten restore hook.",
@@ -120,20 +120,21 @@ d.table_slide(
     "One action, and it fails the whole backup rather than protecting some projects quietly",
     ["CP4D folder", "Validated with"],
     [
-        ("5.4 (5.4.0 Patch 7)", "OpenShift 4.21.30, Kasten 9.0.7, cpdctl 1.10.34, keeper image cp4d-backup:5.4-r2"),
-        ("5.2 (5.2.x)", "OpenShift 4.18.6, Kasten 8.5.12, cpdctl 1.8.244, keeper image cp4d-backup:5.2-r4"),
-        ("4.8 (4.8.9)", "OpenShift 4.18.56, Kasten 9.0.8, cpdctl 1.10.34, keeper image cp4d-backup:4.8-r2"),
+        ("5.4 (5.4.0 Patch 7)", "OpenShift 4.21.30, Kasten 9.0.11, cpdctl 1.10.34, keeper image cp4d-backup:5.4-r3"),
+        ("5.2 (5.2.x)", "OpenShift 4.18.6, Kasten 8.5.12, cpdctl 1.8.244, keeper image cp4d-backup:5.2-r5"),
+        ("4.8 (4.8.9)", "OpenShift 4.18.56, Kasten 9.0.8, cpdctl 1.10.34, keeper image cp4d-backup:4.8-r3"),
     ],
     col_widths=[1.9, 3.95],
     row_heights=[0.5] + [0.95] * 3,
     side=('upload_cloud', "backupPrehook — WHAT orchestrate.sh DOES",
+          "Runs scripts read from a ConfigMap in kasten-io, not from the image.\n"
           "Authenticates cpdctl using a cross-namespace secret.\n"
           "Enumerates all CP4D analytics projects.\n"
           "Enrols itself as editor on any project it is not already a member of — and "
           "aborts before any data moves if that fails.\n"
           "Ensures one permanent GUID-keyed PVC per project.\n"
           "Launches one export pod per project, with bounded concurrency, one retry, "
-          "and an atomic unzip into /backup/current.\n"
+          "and an atomic swap of export.zip into /backup/current.\n"
           "Prunes the PVCs of deleted projects.\n"
           "Deletes the export pods, so nothing sensitive is left to be captured.\n"
           "Exits non-zero — failing the whole backup — if any project fails to enrol "

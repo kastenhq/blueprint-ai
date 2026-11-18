@@ -52,9 +52,12 @@ unit of granularity = unit of multi-tenant restore**.
 - **Store the export zip as is** (`/backup/current/export.zip`), and give it back to CP4D unchanged
   at restore (`cpdctl asset import start --import-file`). Earlier versions extracted the zip so that
   a small change rewrote only one file. We stopped: the zip is produced by the CP4D export service,
-  its content is IBM's format, and CP4D 5.4 was seen to put **the same entry twice** in one zip
-  (`assets/.METADATA/orchestration_flow.<id>.json`, a pipeline flow). `unzip` then stops on an
-  interactive `replace ...?` prompt and the export fails. The cost: a zip is compressed, so any
+  its content is IBM's format, and CP4D 5.4 puts **the same entry twice** in one zip: for every
+  Watson Pipelines pipeline in the project, `assets/.METADATA/orchestration_flow.<id>.json` appears
+  two times, with identical bytes. `unzip` then stops on an interactive `replace ...?` prompt, reads
+  end-of-file because the pod has no terminal, and exits with code 1, so the export fails.
+  `cpdctl asset import start --import-file` accepts the same zip without error (validated
+  2026-11-18, see [Test it end-to-end](#test-it-end-to-end)). The cost: a zip is compressed, so any
   change in the project changes most of its bytes, and each snapshot and each export to object
   storage holds about the full size of the zip. This has not been measured.
 - **The scripts are not in the image.** They are in [scripts/](scripts/) and reach the pods through
@@ -71,17 +74,19 @@ unit of granularity = unit of multi-tenant restore**.
 
 ## Versions
 
-Detected on the cluster where this blueprint was last tested (2026-10-16). It was first developed
-on OpenShift 4.18.6 / Kubernetes 1.31.6 / Kasten 8.5.12 / CP4D 5.2.x with `cpdctl` 1.8.244. The last
-revision validated on CP4D 5.2 is the git tag [`cp4d-5.2`](https://github.com/kastenhq/blueprint-ai/tree/cp4d-5.2).
+Detected on the cluster where this blueprint was last tested (2026-11-18): a new OpenShift cluster
+on Azure, installed with CP4D 5.4.0 Patch 7, Watson Pipelines and DataStage. The previous
+validation (2026-10-16) ran on bare metal with Kasten 9.0.7 (OLM) and ODF
+`ocs-storagecluster-ceph-rbd`, after an upgrade from CP4D 5.2.2. It was first developed on OpenShift
+4.18.6 / Kubernetes 1.31.6 / Kasten 8.5.12 / CP4D 5.2.x with `cpdctl` 1.8.244.
 
 | Component | Version |
 |---|---|
 | Kubernetes | 1.34.9 |
-| OpenShift | 4.21.30 |
-| Kasten | 9.0.7 (OLM operator `k10-kasten-operator-rhmp.v9.0.7`) |
-| Storage | ODF `ocs-storagecluster-ceph-rbd` |
-| Cloud Pak for Data / IBM Software Hub | 5.4.0 Patch 7 (`ibmcpd-cr` 5.10.7, Watson Studio `ws` 13.0.4, Common Core Services 13.0.6) |
+| OpenShift | 4.21.30 (installer-provisioned, Azure) |
+| Kasten | 9.0.11 (Helm chart `k10-9.0.11`) |
+| Storage | Azure Disk CSI `managed-csi` (snapshot class `csi-azuredisk-vsc`) |
+| Cloud Pak for Data / IBM Software Hub | 5.4.0 Patch 7 (`ibmcpd-cr` 5.10.7, Watson Studio `ws` 13.0.4, Common Core Services 13.0.6, Watson Pipelines 5.4.7, DataStage Enterprise 5.4.7) |
 | cpdctl | 1.10.34 |
 | kubectl (in the keeper image) | 1.34.9 |
 | Keeper image | `ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.4-r3` (built from [images/cp4d-backup/](images/cp4d-backup/); tools only. `-r2` and earlier had the scripts inside the image; `-r1` and earlier did not pass `CRED_NS` / `CRED_SECRET` to the export pods, so they read the credential Secret from `cpd` whatever the blueprint set) |
@@ -464,7 +469,8 @@ EOF
 ```
 
 > **Storage class**: the blueprint defaults to `ocs-storagecluster-ceph-rbd`, the ODF RBD class of
-> the cluster it was last tested on (it was first developed on Azure with `managed-csi`). Replace it
+> our bare-metal test cluster. The last validation (2026-11-18) ran on Azure with `managed-csi`
+> instead. Replace it
 > (in [blueprint.yaml](blueprint.yaml), `STORAGE_CLASS`) with a class that supports **CSI
 > snapshots** on your cluster (for example `managed-csi` on AKS, `ebs-sc` on AWS, `standard-rwo` on
 > GKE) and has a matching `VolumeSnapshotClass` registered with Kasten. Do **not** use legacy
@@ -724,6 +730,29 @@ kubectl get restorepoint -n cp4d-projects-backup
 ./bin/cpdctl asset search --project-id <new-pid> --type-name notebook   --query '*:*'
 ./bin/cpdctl asset search --project-id <new-pid> --type-name data_asset --query '*:*'
 ```
+
+**Validated end-to-end on 2026-11-18: export stored as a zip, scripts from the ConfigMap, fail-fast
+wait** (Kasten 9.0.11 / OpenShift 4.21.30 on Azure / CP4D 5.4.0 Patch 7 with Watson Pipelines and
+DataStage, keeper image `5.4-r3`, storage `managed-csi`). Seven projects, each with a compiled
+DataStage flow, its job and a file data asset `marker.csv`. Projects 1 to 5 also had a Watson
+Pipelines pipeline (project 1 had two), projects 6 and 7 had none.
+
+| Check | Result |
+|---|---|
+| Scripts from the ConfigMap | First line of the run: `scripts from ConfigMap kasten-io/cp4d-backup-scripts: sha256 8a9346be3213`, the same value as `cat scripts/*.sh \| sha256sum` in git |
+| `backupPrehook` through a `RunAction` | `Complete`. 7 projects discovered, 7 export pods (4 at a time), 7 PVCs, one restore point |
+| What is on each PVC | `export.zip` (175 to 183 KB), `.cp4d-project-id`, `.cp4d-project-name` |
+| Duplicate entries in the zip | **One per pipeline**: 2 in project 1, 1 in projects 2 to 5, 0 in projects 6 and 7. The two copies of `orchestration_flow.<id>.json` have the same MD5 |
+| `unzip` on one of these zips | `replace …/orchestration_flow.<id>.json? … (EOF or read error, treating as "[N]one" ...)`, exit code 1. This is the error of the earlier versions |
+| Change before restore | Project 4: pipeline deleted, DataStage job deleted, `marker.csv` replaced by a `v2-CHANGED` version |
+| Granular restore | A `RestoreAction` filtered to the project 4 PVC restored only that PVC, into a new namespace |
+| `restore.sh` (same name, typed confirmation) | Deleted the changed project, created a new one, `importing /backup/current/export.zip (177066 bytes) … State: completed` |
+| Data check | Pipeline `pipe-4`, job `customers-etl-job` and flow back; `marker.csv` back to `v1`; the restored job **ran without recompiling** (`5 records exported`, `Completed`) |
+| Fail-fast, a failing export | One line added to `export-project.sh` **in the ConfigMap only** made project 2 exit 1. The pod failed in seconds and did not block the batch. The 6 other projects were exported, project 2 was retried once, and the prehook ended with `BACKUP PREHOOK FAILED: 1 project(s) failed to export: <guid>` |
+
+> Kasten runs a failed `backupPrehook` again by itself, so the failing `RunAction` above took
+> 403 seconds in total for about 2 minutes per attempt. This is Kasten's retry, not a wait in the
+> script.
 
 **Re-validated end-to-end on 2026-10-16 after upgrading CP4D from 5.2.2 to 5.4.0 Patch 7**
 (Kasten 9.0.7 / OpenShift 4.21.30, keeper image `1.10.34-1`, storage `ocs-storagecluster-ceph-rbd`).

@@ -1,6 +1,10 @@
 # Keeper / orchestrator image for the CP4D artifact-backup blueprint.
 # Provides: cpdctl (CP4D logical export/import), kubectl (read cross-ns cred secret,
-# manage export pods), plus jq / unzip / bash for the orchestration + atomic unzip.
+# manage export pods), plus jq / bash. unzip is kept only to inspect a bundle by hand.
+#
+# Tools only: the backup/restore SCRIPTS are not in this image. They are in
+# ../../scripts/ and reach the pods through the cp4d-backup-scripts ConfigMap, so a
+# script fix does not need a new image.
 #
 # Base: debian slim. Runs as an arbitrary (OpenShift-assigned) UID — work dirs are
 # group-writable so a random UID in group 0 can write.
@@ -13,7 +17,7 @@ ARG KUBECTL_VERSION=v1.31.6
 # cpdctl / kubectl version. The published tag is <CP4D version folder>-r<IMAGE_REVISION>
 # (for example 5.4-r1), set by .github/workflows/cp4d-backup-image.yaml. That workflow
 # refuses to overwrite a tag that a blueprint on main already uses.
-ARG IMAGE_REVISION=4
+ARG IMAGE_REVISION=5
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl jq unzip bash tar gzip \
@@ -28,11 +32,6 @@ RUN curl -fsSL "https://github.com/IBM/cpdctl/releases/download/${CPDCTL_VERSION
 RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
       -o /usr/local/bin/kubectl \
     && chmod 0755 /usr/local/bin/kubectl
-
-# orchestration scripts (baked in so the blueprint stays tiny and the image is self-contained)
-COPY cpdctl-login.sh export-project.sh import-project.sh orchestrate.sh /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/cpdctl-login.sh /usr/local/bin/export-project.sh \
-               /usr/local/bin/import-project.sh /usr/local/bin/orchestrate.sh
 
 # cpdctl config is rendered here at runtime (world-writable /tmp => any OpenShift UID); never persisted
 ENV CPDCONFIG=/tmp/.cpdctl-config.json

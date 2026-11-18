@@ -71,9 +71,15 @@ namespace.
 - **Permanent, GUID-keyed PVCs** (`cp4d-<sanitized-name>-<short-guid>`) — created if missing,
   refreshed every run, pruned when the project is deleted. Permanence is what lets CSI block-level
   incremental dedup work across successive snapshots.
-- **Store the export UNZIPPED.** A zip is opaque to block-level dedup: a one-cell notebook edit
-  rewrites the whole archive. Unzipped, a one-cell edit rewrites one file, and the ~70 % constant
-  schema mass (see §5) dedups across snapshots.
+- **Store the export zip as is.** The first versions extracted the zip, because a zip is opaque to
+  block-level dedup: a one-cell notebook edit rewrites the whole archive, whereas extracted, it
+  rewrites one file and the ~70 % constant schema mass (see §5) dedups across snapshots. We
+  stopped. The zip is built by the CP4D export service, in a format IBM owns and can change, and
+  CP4D 5.4 writes the metadata of each Watson Pipelines pipeline **twice** in the same zip
+  (`assets/.METADATA/orchestration_flow.<id>.json`, identical bytes). `unzip` stops on that with an
+  interactive `replace …?` prompt, and the export fails. `cpdctl asset import start --import-file`
+  takes the zip unchanged. The cost is incrementality: every backup now stores about the full size
+  of the zip. It has not been measured.
 - **Restore is decoupled from Kasten restore hooks** — a standalone [restore.sh](5.4/restore.sh) runs
   the `cpdctl import`. More robust, and it fits the multi-tenant / mass-migration story where
   different users restore different projects into different namespaces.
@@ -147,7 +153,8 @@ CP4D 5.2.x, `cpdctl` 1.8.244. Bundle: 147 KB, 76 files. Three layers:
   project.
 - **`assettypes/` — 70 files, ~70 % of the bundle.** Asset-type **schemas** (the metamodel), not
   instances. This is why a 995-byte notebook yields a 147 KB bundle: schema overhead is roughly
-  **constant regardless of content**, which is precisely why storing the bundle unzipped pays off.
+  **constant regardless of content**. That is why the first versions stored the bundle extracted;
+  see §3 for why the zip is now stored as is.
 
 **Round-trip fidelity — verified:**
 

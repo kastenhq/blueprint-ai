@@ -5,7 +5,11 @@
 #
 # The preHook runs BEFORE Kasten's PVC discovery, so every per-project PVC it creates
 # is included in the restore point. It runs as a KubeTask in kasten-io (cluster-wide
-# Kasten SA) and delegates all real work to orchestrate.sh baked into the keeper image.
+# Kasten SA) and delegates all real work to orchestrate.sh.
+#
+# The scripts are NOT in the image. They come from the ConfigMap cp4d-backup-scripts in
+# kasten-io, mounted at /scripts. To change a script, update the ConfigMap (see README);
+# no image rebuild is needed. The image only provides the tools (cpdctl, kubectl, jq).
 apiVersion: cr.kanister.io/v1alpha1
 kind: Blueprint
 metadata:
@@ -18,20 +22,30 @@ actions:
         name: exportAllProjects
         args:
           namespace: kasten-io          # cluster-wide Kasten SA: read cpd cred secret + manage PVCs/pods in BACKUP_NS
-          image: ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.2-r4
+          image: ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.2-r5
+          podOverride:
+            volumes:
+              - name: scripts
+                configMap: { name: cp4d-backup-scripts, defaultMode: 0755 }
+            containers:
+              - name: container           # the KubeTask container is always named "container"
+                volumeMounts:
+                  - { name: scripts, mountPath: /scripts }
           command:
             - bash
             - -c
             - |
               set -euo pipefail
               export BACKUP_NS="{{ .Namespace.Name }}"          # = cp4d-projects-backup (the namespace being backed up)
-              export IMAGE="ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.2-r4"
+              export IMAGE="ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.2-r5"
               export STORAGE_CLASS="managed-csi"                # cluster-specific CSI snapshot class (see README)
               export KEEPER_SA="cp4d-backup-keeper"
               export CRED_NS="cpd"                              # credential secret lives OUTSIDE the backed-up ns
               export CRED_SECRET="cp4d-backup-cpdctl-creds"
               export PVC_SIZE="1Gi"
               export MAX_PARALLEL="4"
-              export EXPORT_TIMEOUT="900s"
+              export EXPORT_TIMEOUT="900"                        # seconds per export pod
               export ENCRYPTION_KEY=""                          # V1: plaintext bundle (see README §security)
-              orchestrate.sh
+              export SCRIPTS_CM="cp4d-backup-scripts"           # copied into BACKUP_NS for the export pods
+              export SCRIPTS_NS="kasten-io"
+              /scripts/orchestrate.sh
