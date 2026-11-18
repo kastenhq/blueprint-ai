@@ -162,16 +162,16 @@ d.table_slide(
     "Late capture needs Kasten 9.0.11 or later",
     ["Component", "Version"],
     [
-        ("OpenShift", "4.21.30 (bare metal, ODF)"),
-        ("Kasten", "9.0.11 operator"),
+        ("OpenShift", "4.18.21 (Azure)"),
+        ("Kasten", "9.0.11 (Helm, Argo CD)"),
         ("Template", "mysql-ephemeral, 8.0-el8"),
-        ("Database", "MySQL 8.0.45 (RHEL 8)"),
+        ("Database", "MySQL 8.0.43 (RHEL 8)"),
     ],
     col_widths=[3.3, 2.55],
     row_heights=[0.55] * 5,
     side=('settings', "BEFORE YOU USE IT",
-          "Check the version: the Kasten operator CSV must show 9.0.11 "
-          "or later.\n"
+          "Check the version: the Kasten operator CSV (or helm ls) must show "
+          "9.0.11 or later.\n"
           "The staging PVC needs a CSI storage class that supports snapshots, in "
           "Filesystem mode.\n"
           "The policy needs a Location profile, and must export: local snapshots are "

@@ -61,7 +61,7 @@ empty namespace, MongoDB starts on **new, empty volumes** and the dump rebuilds 
 
 | Component | Version |
 |---|---|
-| Kubernetes | `1.35.8` (EKS) |
+| Kubernetes | `1.35.9` (EKS) |
 | Kasten | `9.0.11` |
 | Helm chart | `bitnami/mongodb 20.0.17` |
 | Database | `MongoDB 8.0.11` (`bitnamilegacy/mongodb:8.0.11-debian-12-r1`), replica set `rs0`: 2 data members + 1 arbiter |
@@ -152,6 +152,8 @@ helm uninstall mongo-logical -n mongodb-logical
 kubectl delete pvc -n mongodb-logical --all        # Helm leaves the data PVCs
 kubectl delete namespace mongodb-logical
 kubectl delete policy mongodb-logical-backup -n kasten-io
+kubectl delete blueprintbinding mongodb-logical-late-capture-binding -n kasten-io
+kubectl delete blueprint mongodb-logical-late-capture-blueprint -n kasten-io
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=mongodb-logical
 ```
 
@@ -272,7 +274,7 @@ filter. The restore then replaces the volumes **and** replays the dump.
 3. **Restore** (in place):
 
    ```bash
-   kubectl get restorepoint -n mongodb-logical
+   kubectl get restorepoint -n mongodb-logical   # use the local one, scheduled-<id>; the exported copy adds a suffix
    kubectl create -f - --validate=false <<EOF
    apiVersion: actions.kio.kasten.io/v1alpha1
    kind: RestoreAction
@@ -334,9 +336,10 @@ Then run the same RestoreAction as above with `name: mongodb-logical-restored`. 
 restore point content of an **exported** restore point (the one created by the export action,
 named `<namespace>-scheduled-<id><suffix>`).
 
-Tested on Kasten 9.0.10: after deleting the namespace, the restore from the exported restore point
-created new data PVCs, MongoDB formed a new replica set, and `restorePosthook` loaded the dump —
-the 4 restaurants and all 40,800 records of the Step 6 dataset came back.
+Tested on Kasten 9.0.11, with no feature flag: after deleting the namespace, the restore from the
+exported restore point created new data PVCs, MongoDB formed a new replica set, and
+`restorePosthook` loaded the dump — the 4 restaurants came back, and a new backup after the restore
+completed. An earlier run on 9.0.10 also brought back all 40,800 records of the Step 6 dataset.
 
 > **Restore under the same namespace name.** The Bitnami chart writes the release namespace into
 > its `setup.sh` ConfigMap (`<sts>-scripts`), in the command that looks for the current primary

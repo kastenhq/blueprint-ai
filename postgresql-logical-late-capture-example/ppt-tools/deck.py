@@ -163,7 +163,7 @@ d.table_slide(
     "Late capture needs Kasten 9.0.11 or later",
     ["Component", "Version"],
     [
-        ("Kubernetes", "1.35.8 (EKS)"),
+        ("Kubernetes", "1.35.9 (EKS)"),
         ("Kasten", "9.0.11"),
         ("Helm chart", "bitnami/postgresql 16.7.27"),
         ("Database", "PostgreSQL 17.6, standalone"),

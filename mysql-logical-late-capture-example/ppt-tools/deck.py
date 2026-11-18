@@ -161,7 +161,7 @@ d.table_slide(
     "Late capture needs Kasten 9.0.11 or later",
     ["Component", "Version"],
     [
-        ("Kubernetes", "1.35.8 (EKS)"),
+        ("Kubernetes", "1.35.9 (EKS)"),
         ("Kasten", "9.0.11"),
         ("Helm chart", "bitnami/mysql 14.0.3"),
         ("Database", "MySQL 9.4.0, standalone"),

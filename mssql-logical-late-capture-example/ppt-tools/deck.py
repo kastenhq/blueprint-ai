@@ -131,7 +131,7 @@ d.table_slide(
     "Late capture needs Kasten 9.0.11 or later",
     ["Component", "Version"],
     [
-        ("Kubernetes", "1.35.8 (EKS)"),
+        ("Kubernetes", "1.35.9 (EKS)"),
         ("Kasten", "9.0.11"),
         ("Database", "SQL Server 2019 CU27"),
         ("Tools image", "kasten-tools:9.0.11"),

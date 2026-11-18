@@ -44,8 +44,9 @@ This blueprint writes the dump to a **staging PVC** instead, and **Kasten is the
 
 **The image comes from the workload.** The blueprint reads the image of the `DeploymentConfig`'s
 container (`{{ (index .Object.spec.template.spec.containers 0).image }}`). An OpenShift image
-trigger writes the resolved image there (`registry.redhat.io/rhel8/mysql-80@sha256:…`), so
-`mysqldump` and `mysql` always match the server, wherever the image stream points.
+trigger writes the resolved image there (`registry.redhat.io/rhel8/mysql-80@sha256:…`, or
+`image-registry.openshift-image-registry.svc:5000/openshift/mysql@sha256:…` with the samples image
+stream), so `mysqldump` and `mysql` always match the server, wherever the image stream points.
 
 ## Pattern
 
@@ -54,7 +55,7 @@ the request was to port the documentation example to late capture.
 
 Why it fits: a `mysqldump` output is a **full** dump, so it does not need the previous backup on the
 volume. A PVC that exists only during the backup is enough. The blueprint is bound to the
-`DeploymentConfig`: Kasten 9.0.10 treats a `DeploymentConfig` as a workload, so late capture and
+`DeploymentConfig`: Kasten 9.0.11 treats a `DeploymentConfig` as a workload, so late capture and
 BlueprintBinding both work.
 
 **The template is ephemeral: the dump is the only copy of the data.** `mysql-ephemeral` keeps the
@@ -65,8 +66,11 @@ exclude it in the policy if the dump is meant to replace it (see [The policy](#t
 
 **What the backup protects:** every database, user and grant on the server (`--all-databases`
 includes the `mysql` system schema), stored procedures, functions and events, as of the start of
-the dump. Every Kubernetes object in the namespace (`DeploymentConfig`, Secret, Service,
-ImageStream) is also in the restore point.
+the dump. Every Kubernetes object in the namespace (`DeploymentConfig`, Secret, Service, and the
+ImageStream when you imported it into the namespace) is also in the restore point. The samples
+image stream in `openshift` is **not**: a restore to a cluster where it does not exist leaves the
+`DeploymentConfig` waiting for an image. Import the image stream into the namespace (Step 2) if
+the restore may land on such a cluster.
 
 **What it does not protect:** tables that do not use InnoDB (MyISAM, for example):
 `--single-transaction` does not make them consistent with the rest.
@@ -80,21 +84,22 @@ MySQL.
 
 | Component | Version |
 |---|---|
-| OpenShift | `4.21.30` (bare metal, OpenShift Data Foundation) |
-| Kasten | `9.0.11` (OpenShift operator) |
+| OpenShift | `4.18.21` (Azure, Azure Disk CSI) |
+| Kasten | `9.0.11` (Helm chart, deployed by Argo CD) |
 | Template | `mysql-ephemeral` from `openshift/origin` (`master`), `MYSQL_VERSION=8.0-el8` |
-| Database | `MySQL 8.0.45` (`registry.redhat.io/rhel8/mysql-80`) |
+| Database | `MySQL 8.0.43` (samples image stream `openshift/mysql:8.0-el8`) |
 
-The manual validation (Step 3) was also run on OpenShift `4.18.21` on Azure (MySQL `8.0.43`, Azure
-Disk CSI).
+The blueprint was first written and tested on OpenShift `4.21.30` (bare metal, OpenShift Data
+Foundation) with Kasten `9.0.10` and MySQL `8.0.45`; the manual validation (Step 3) was run on both
+clusters.
 
 > Detect your own Kasten version with
 > `kubectl get csv -n kasten-io -o jsonpath='{.items[?(@.spec.displayName=="Kasten K10")].spec.version}'`
 > (operator) or `helm ls -n kasten-io` (Helm).
 
 `DeploymentConfig` is deprecated since OpenShift 4.14 and is an optional cluster capability; it was
-still enabled on 4.21. For a new deployment, prefer a `Deployment`; the blueprint then needs
-`.Deployment` instead of `.DeploymentConfig`, and the binding `apps/deployments`.
+still enabled on 4.18 and 4.21. For a new deployment, prefer a `Deployment`; the blueprint then
+needs `.Deployment` instead of `.DeploymentConfig`, and the binding `apps/deployments`.
 
 ## Files
 
@@ -122,6 +127,7 @@ still enabled on 4.21. For a new deployment, prefer a `Deployment`; the blueprin
 > AWS, your custom class on bare-metal, and so on).
 > The class must have a matching `VolumeSnapshotClass` registered with Kasten.
 > Do **not** use legacy in-tree classes (for example, `gp2` on AWS) — they do not support CSI snapshots.
+> The Kasten `9.0.11` test on Azure used `managed-csi`.
 
 The staging PVC requests `2Gi`. Set the size in `blueprint.yaml` above the size of your largest
 compressed dump.
@@ -134,18 +140,23 @@ The template takes its image from the `mysql` image stream in the namespace give
 (default: `openshift`). That image stream is part of the OpenShift samples. On a cluster where the
 Samples Operator is `Removed`, the image stream does not exist and the `DeploymentConfig` never
 starts. Create the image stream in the application namespace instead, from the image the samples
-use:
+use, and point `NAMESPACE` there. `NAMESPACE` must name the namespace that really holds the image
+stream:
 
 ```bash
 oc create namespace mysql-logical
 
-# Only if `oc get is mysql -n openshift` finds nothing:
-oc import-image mysql:8.0-el8 --from=registry.redhat.io/rhel8/mysql-80:latest --confirm -n mysql-logical
+if oc get is mysql -n openshift >/dev/null 2>&1; then
+  IS_NS=openshift
+else
+  oc import-image mysql:8.0-el8 --from=registry.redhat.io/rhel8/mysql-80:latest --confirm -n mysql-logical
+  IS_NS=mysql-logical
+fi
 
 oc new-app https://raw.githubusercontent.com/openshift/origin/master/examples/db-templates/mysql-ephemeral-template.json \
   --namespace mysql-logical \
   -p MYSQL_ROOT_PASSWORD=secretpassword \
-  -p NAMESPACE=mysql-logical            # omit to use the image stream in the openshift namespace
+  -p NAMESPACE="${IS_NS}"
 oc rollout status dc/mysql -n mysql-logical
 ```
 
@@ -172,6 +183,8 @@ Expected: 4 rows.
 ```bash
 oc delete namespace mysql-logical
 kubectl delete policy mysql-logical-backup -n kasten-io
+kubectl delete blueprintbinding mysql-logical-late-capture-openshift-binding -n kasten-io
+kubectl delete blueprint mysql-logical-late-capture-openshift-blueprint -n kasten-io
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=mysql-logical
 ```
 
@@ -293,7 +306,7 @@ the exported copy is what a restore after the loss of the namespace or the clust
 3. **Restore** (in place):
 
    ```bash
-   kubectl get restorepoint -n mysql-logical
+   kubectl get restorepoint -n mysql-logical   # use the local one, scheduled-<id>; the exported copy adds a suffix
    kubectl create -f - --validate=false <<EOF
    apiVersion: actions.kio.kasten.io/v1alpha1
    kind: RestoreAction
@@ -319,8 +332,8 @@ the exported copy is what a restore after the loss of the namespace or the clust
 
 ### Restore after the namespace was deleted
 
-Kasten restores the `DeploymentConfig`, the Secret, the Service and the image stream. MySQL starts
-empty (the template is ephemeral), and `restorePosthook` loads the dump.
+Kasten restores the `DeploymentConfig`, the Secret, the Service and, if it was imported into the
+namespace, the image stream. MySQL starts empty (the template is ephemeral), and `restorePosthook` loads the dump.
 
 > **The policy must export.** Kasten keeps the local `VolumeSnapshot` of the staging PVC in the
 > application namespace, with the `Delete` policy of the `VolumeSnapshotClass`. Deleting the
@@ -346,12 +359,15 @@ EOF
 
 Then run the same RestoreAction as above with `name: mysql-logical-restored`.
 
-Tested on OpenShift 4.21 with Kasten 9.0.10 (operator):
+Tested on OpenShift 4.18.21 (Azure) with Kasten 9.0.11, with no feature flag, the staging PVC on
+`managed-csi`:
 - the restore after deleting the namespace, from the exported restore point, brought back the 4
   rows into a new, empty MySQL pod;
 - a new backup after that restore completed;
 - the in-place restore after dropping `test` brought back the 4 rows;
 - the staging PVC was deleted after every backup and every restore.
+
+The first version passed the same tests on OpenShift 4.21 (bare metal) with Kasten 9.0.10.
 
 ---
 

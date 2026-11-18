@@ -63,7 +63,7 @@ server: `pg_dumpall` refuses to dump a server newer than itself.
 the request was to port the documentation example to late capture.
 
 Why it fits: a `pg_dumpall` output is a **full** dump, so it does not need the previous backup on
-the volume. The blueprint is bound to the `DeploymentConfig`, which Kasten 9.0.10 treats as a
+the volume. The blueprint is bound to the `DeploymentConfig`, which Kasten 9.0.11 treats as a
 workload, so late capture and BlueprintBinding both work.
 
 **The template is ephemeral: the dump is the only copy of the data.** `postgresql-ephemeral` keeps
@@ -86,13 +86,14 @@ PostgreSQL.
 
 | Component | Version |
 |---|---|
-| OpenShift | `4.21.30` (bare metal, OpenShift Data Foundation) |
-| Kasten | `9.0.11` (OpenShift operator) |
+| OpenShift | `4.18.21` (Azure, Azure Disk CSI) |
+| Kasten | `9.0.11` (Helm chart, deployed by Argo CD) |
 | Template | `postgresql-ephemeral` from `openshift/origin` (`release-4.11`), `POSTGRESQL_VERSION=15-el9` |
-| Database | `PostgreSQL 15.19` (`registry.redhat.io/rhel9/postgresql-15`) |
+| Database | `PostgreSQL 15.14` (samples image stream `openshift/postgresql:15-el9`) |
 
-The manual validation (Step 3) was also run on OpenShift `4.18.21` on Azure (PostgreSQL `15.14`,
-Azure Disk CSI). `DeploymentConfig` is deprecated since OpenShift 4.14; see the
+The blueprint was first written and tested on OpenShift `4.21.30` (bare metal, OpenShift Data
+Foundation) with Kasten `9.0.10` and PostgreSQL `15.19`; the manual validation (Step 3) was run on
+both clusters. `DeploymentConfig` is deprecated since OpenShift 4.14; see the
 [MySQL page](../mysql-logical-late-capture-openshift-example/README.md#versions) for what to change
 for a `Deployment`.
 
@@ -124,6 +125,7 @@ for a `Deployment`.
 > (for example, `managed-csi` on Azure, `gp3-csi` on ROSA or AWS, your custom class on bare-metal,
 > and so on). The class must have a matching `VolumeSnapshotClass` registered with Kasten.
 > Do **not** use legacy in-tree classes (for example, `gp2` on AWS) — they do not support CSI snapshots.
+> The Kasten `9.0.11` test on Azure used `managed-csi`.
 
 ---
 
@@ -131,18 +133,24 @@ for a `Deployment`.
 
 The template takes its image from the `postgresql` image stream in the namespace given by
 `NAMESPACE` (default: `openshift`), part of the OpenShift samples. If the Samples Operator is
-`Removed`, create the image stream in the application namespace:
+`Removed`, that image stream does not exist: import it into the application namespace and point
+`NAMESPACE` there. `NAMESPACE` must name the namespace that really holds the image stream,
+otherwise the `DeploymentConfig` waits for it and never starts a pod.
 
 ```bash
 oc create namespace postgresql-logical
 
-# Only if `oc get is postgresql -n openshift` finds nothing:
-oc import-image postgresql:15-el9 --from=registry.redhat.io/rhel9/postgresql-15:latest --confirm -n postgresql-logical
+if oc get is postgresql -n openshift >/dev/null 2>&1; then
+  IS_NS=openshift
+else
+  oc import-image postgresql:15-el9 --from=registry.redhat.io/rhel9/postgresql-15:latest --confirm -n postgresql-logical
+  IS_NS=postgresql-logical
+fi
 
 oc new-app https://raw.githubusercontent.com/openshift/origin/release-4.11/examples/db-templates/postgresql-ephemeral-template.json \
   --namespace postgresql-logical \
   -p POSTGRESQL_VERSION=15-el9 \
-  -p NAMESPACE=postgresql-logical \
+  -p NAMESPACE="${IS_NS}" \
   -e POSTGRESQL_ADMIN_PASSWORD=secretpassword
 oc create secret generic postgresql-postgresql-logical --namespace postgresql-logical \
   --from-literal=postgresql_admin_password=secretpassword
@@ -174,6 +182,8 @@ Expected: 4 rows.
 ```bash
 oc delete namespace postgresql-logical
 kubectl delete policy postgresql-logical-backup -n kasten-io
+kubectl delete blueprintbinding postgresql-logical-late-capture-openshift-binding -n kasten-io
+kubectl delete blueprint postgresql-logical-late-capture-openshift-blueprint -n kasten-io
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=postgresql-logical
 ```
 
@@ -256,15 +266,18 @@ namespace.
 Restore from the **exported** restore point, as described on the
 [MySQL page](../mysql-logical-late-capture-openshift-example/README.md#restore-after-the-namespace-was-deleted):
 create the namespace, a `RestorePoint` from the exported `RestorePointContent`, then the
-`RestoreAction`. Kasten restores the `DeploymentConfig`, both Secrets, the Service and the image
-stream; PostgreSQL starts empty and `restorePosthook` loads the dump.
+`RestoreAction`. Kasten restores the `DeploymentConfig`, both Secrets, the Service and, if it was
+imported into the namespace, the image stream; PostgreSQL starts empty and `restorePosthook` loads the dump.
 
-Tested on OpenShift 4.21 with Kasten 9.0.10 (operator):
+Tested on OpenShift 4.18.21 (Azure) with Kasten 9.0.11, with no feature flag, the staging PVC on
+`managed-csi`:
 - the in-place restore after dropping `test` brought back the 4 rows;
 - the restore after deleting the namespace, from the exported restore point, brought back the 4
   rows into a new, empty PostgreSQL pod;
 - a new backup after that restore completed;
 - the staging PVC was deleted after every backup and every restore.
+
+The first version passed the same tests on OpenShift 4.21 (bare metal) with Kasten 9.0.10.
 
 ---
 

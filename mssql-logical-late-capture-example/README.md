@@ -114,7 +114,7 @@ not measured for SQL Server.
 
 | Component | Version |
 |---|---|
-| Kubernetes | `1.35.8` (EKS) |
+| Kubernetes | `1.35.9` (EKS) |
 | Kasten | `9.0.11` |
 | Database | `SQL Server 2019 CU27` (`mcr.microsoft.com/mssql/server:2019-CU27-ubuntu-20.04`), Developer edition |
 | Tools image | `ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11` ([Dockerfile](../images/kasten-tools/Dockerfile)) |
@@ -267,6 +267,8 @@ Expected: 4 rows.
 ```bash
 kubectl delete namespace mssql-logical
 kubectl delete policy mssql-logical-backup -n kasten-io
+kubectl delete blueprintbinding mssql-logical-late-capture-binding -n kasten-io
+kubectl delete blueprint mssql-logical-late-capture-blueprint -n kasten-io
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=mssql-logical
 ```
 
@@ -378,7 +380,7 @@ the cluster uses.
 3. **Restore** (in place):
 
    ```bash
-   kubectl get restorepoint -n mssql-logical
+   kubectl get restorepoint -n mssql-logical   # use the local one, scheduled-<id>; the exported copy adds a suffix
    kubectl create -f - --validate=false <<EOF
    apiVersion: actions.kio.kasten.io/v1alpha1
    kind: RestoreAction
@@ -456,9 +458,10 @@ Secret, the ServiceAccount and Role of `rbac.yaml`, the Deployment and the stagi
 starts on the empty volume with the restored `SA_PASSWORD`, and `restorePosthook` restores the user
 databases.
 
-Tested on Kasten 9.0.10: the in-place restore (after checking that `test` was gone) and the restore
-after deleting the namespace (from the exported restore point, with the data PVC created by hand)
-both brought back the 4 rows, and a new backup after the second restore completed.
+Tested on Kasten 9.0.11, with no feature flag: the in-place restore (after checking that `test`
+was gone) and the restore after deleting the namespace (from the exported restore point, with the
+data PVC created by hand) both brought back the 4 rows, and a new backup after the second restore
+completed.
 
 ---
 

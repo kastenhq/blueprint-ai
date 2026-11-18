@@ -88,7 +88,7 @@ Select the backup pattern from the list in [kasten-kanister.md](kasten-kanister.
 3. **Database snapshot on a permanent workload PVC (PVC mounted by workload)** — the workload mounts a dedicated backup PVC; `backupPrehook` uses `KubeExec` to run the snapshot tool in the workload pod. PVC pre-exists at discovery time. BlueprintBinding on the workload CR.
 4. **Database dump or snapshot on a permanent Keeper PVC (PVC mounted by keeper)** — a dedicated Deployment that runs the backup tool image mounts the backup PVC permanently; `backupPrehook` uses `KubeExec` into the keeper pod. PVC pre-exists at discovery time. BlueprintBinding on the keeper Deployment.
 5. **Database dump or snapshot through a local MinIO keeper (PVC mounted by a keeper, but the keeper exposes S3-protocol)** — a MinIO Deployment in the application namespace acts as the local S3 endpoint, backed by a permanent PVC; the workload's native S3 backup tool writes to MinIO and Kasten snapshots the MinIO PVC. BlueprintBinding on the MinIO Deployment.
-6. **Logical dump or full database snapshot on a staging PVC (late capture)** — `backupPrehook` creates a PVC, writes the dump to it, and declares it in a `lateCapture` output artifact so Kasten snapshots it although discovery ran first; `backupPosthook` deletes it. No keeper, no storage between backups. **Kasten 9.0.10+ with `features.lateCapture=true` only.** BlueprintBinding on the workload.
+6. **Logical dump or full database snapshot on a staging PVC (late capture)** — `backupPrehook` creates a PVC, writes the dump to it, and declares it in a `lateCapture` output artifact so Kasten snapshots it although discovery ran first; `backupPosthook` deletes it. No keeper, no storage between backups. **Kasten 9.0.11+ only.** BlueprintBinding on the workload.
 7. **Create logical dump or database snapshot on PVC already used by the database** — when no extra PVC is acceptable and the dump can safely coexist on the database volumes without exhausting storage. Dangerous; an extra PVC should always be preferred when possible, and with late capture (pattern 6) one almost always is.
 
 > **Patterns 3–5 versus 6: does the tool need its previous backup on the volume?**
@@ -107,19 +107,19 @@ Select the backup pattern from the list in [kasten-kanister.md](kasten-kanister.
 
 > ⚠️ Without late capture, a PVC created during `backupPrehook` is **not** included in the
 > restore point, because PVC discovery runs before `backupPrehook`. On Kasten versions before
-> 9.0.10 (or with the flag off), the only way to include it is to create it inside a
+> 9.0.11, the only way to include it is to create it inside a
 > **BackupAction preHook** (action hook), which runs before PVC discovery. This means:
 > - Context is namespace-only (`{{ .Namespace.Name }}` only — no object-level fields).
 > - One action hook blueprint covers all workloads in the namespace — a **SRP violation**.
 > - Adding a second workload type requiring a temporary PVC requires modifying the same blueprint —
 >   an **OCP violation**.
 > - **Only deploy one type of workload per namespace** when using these patterns.
-> Only choose patterns 8–10 when patterns 1–7 are technically infeasible — on Kasten 9.0.10+,
+> Only choose patterns 8–10 when patterns 1–7 are technically infeasible — on Kasten 9.0.11+,
 > that is pattern 10 only.
 
-8. **Database snapshot on a temporary PVC** — database snapshot tool writes to a temporary PVC created in a BackupAction preHook before discovery. The PVC is empty at each backup, so this is a full snapshot every time. Replaced by pattern 6 on Kasten 9.0.10+.
-9. **Logical dump on a temporary PVC** — dump tool writes to a temporary PVC created in a BackupAction preHook. No incrementality. Replaced by pattern 6 on Kasten 9.0.10+.
-10. **Create dump of an external database on a temporary PVC** — for databases outside the cluster whose dump can be created inside the cluster. No incrementality. Still needed on 9.0.10+: a late-captured PVC requires a blueprint bound to a resource that owns pods, and an external database has none in the cluster.
+8. **Database snapshot on a temporary PVC** — database snapshot tool writes to a temporary PVC created in a BackupAction preHook before discovery. The PVC is empty at each backup, so this is a full snapshot every time. Replaced by pattern 6 on Kasten 9.0.11+.
+9. **Logical dump on a temporary PVC** — dump tool writes to a temporary PVC created in a BackupAction preHook. No incrementality. Replaced by pattern 6 on Kasten 9.0.11+.
+10. **Create dump of an external database on a temporary PVC** — for databases outside the cluster whose dump can be created inside the cluster. No incrementality. Still needed on 9.0.11+: a late-captured PVC requires a blueprint bound to a resource that owns pods, and an external database has none in the cluster.
 
 When **Kasten is not the data mover**, two additional patterns apply. These are not ranked against the list above — they are the only valid options when the database is managed or when the operator owns the backup mechanism:
 
@@ -283,13 +283,14 @@ Mechanics, checks and error messages are in
 The rules that matter when you write one:
 
 1. **Put a version warning at the top of the README**, before the versions table: Kasten
-   `9.0.10` or later **and** `features.lateCapture=true`, with the `helm upgrade` command and the
-   command that checks the flag (`kubectl get cm k10-features -n kasten-io -o jsonpath='{.data.lateCapture}'`).
-   Say what happens without the flag: **the backup succeeds and holds no dump.** Kasten only logs a
-   warning and ignores the declaration.
+   `9.0.11` or later, with the command that shows the installed version (`helm ls -n kasten-io`,
+   or the operator CSV on OpenShift). Say what happens on an older Kasten: **the backup succeeds
+   and holds no dump.** Kasten does not act on the declaration. (Kasten `9.0.10` had late capture
+   behind the `features.lateCapture` flag; `9.0.11` enables it by default. The blueprints here
+   document `9.0.11` only.)
 2. **Do not change an existing blueprint to use late capture.** Its README and versions table
    describe what was tested on an older Kasten version, and users who run that version still need
-   the blueprint as it is: late capture needs Kasten `9.0.10` and the feature flag. Create a new
+   the blueprint as it is: late capture needs Kasten `9.0.11`. Create a new
    blueprint directory (or a new version folder) instead, and re-run Steps 2–5 on it.
 3. **Use a deterministic name** for the staging PVC (`{{ .StatefulSet.Name }}-dump`), never a
    generated one. Both posthooks delete the PVC by name. If a run is interrupted (crash, cancel)

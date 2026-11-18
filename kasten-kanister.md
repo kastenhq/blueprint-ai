@@ -48,7 +48,7 @@ A blueprint attached to a high-level custom resource (for example, an EDB `Clust
 >   BlueprintBinding on the workload that owns (or mounts) the PVC is sufficient.
 > - **Temporary PVCs** (created inside `backupPrehook`) are never discovered → by default they
 >   are never snapshotted. Two ways make a temporary PVC visible to Kasten:
->   - **Late capture** (Kasten `9.0.10` or later, feature flag `features.lateCapture=true`):
+>   - **Late capture** (Kasten `9.0.11` or later):
 >     `backupPrehook` *declares* the PVC in a `lateCapture` output artifact, and Kasten adds it to
 >     the snapshot set after the hook. The blueprint stays resource-bound and works with
 >     BlueprintBinding. See [Late Capture](#late-capture--hook-created-resources-in-the-restore-point).
@@ -126,17 +126,15 @@ skeleton.
 
 ### Late Capture — Hook-Created Resources in the Restore Point
 
-> ⚠️ **Kasten `9.0.10` or later, and only with the feature flag on:**
+> ⚠️ **Kasten `9.0.11` or later.** Check with `helm ls -n kasten-io` (or the operator CSV on
+> OpenShift).
 >
-> ```bash
-> helm upgrade k10 kasten/k10 -n kasten-io --reuse-values --set features.lateCapture=true
-> kubectl get cm k10-features -n kasten-io -o jsonpath='{.data.lateCapture}'   # must print true
-> ```
->
-> **Without the flag, nothing fails.** Kasten logs a warning (*"Late-capture declarations present
-> but the lateCapture feature flag is not set; ignoring them"*) and continues. The staging PVC is
-> created, never snapshotted, and deleted by `backupPosthook`. The restore point is green and holds
-> no dump. Check the flag before you trust a late-capture blueprint.
+> **On an older Kasten, nothing fails.** Kasten does not act on the `lateCapture` artifact and
+> continues. The staging PVC is created, never snapshotted, and deleted by `backupPosthook`. The
+> restore point is green and holds no dump. Check the version before you trust a late-capture
+> blueprint. (Kasten `9.0.10` had late capture behind the `features.lateCapture` flag, and logged
+> *"Late-capture declarations present but the lateCapture feature flag is not set; ignoring them"*
+> when it was off. `9.0.11` enables it by default and has no flag.)
 
 Late capture lets a **resource-bound** `backupPrehook` create a PVC, a ConfigMap or a custom
 resource and still have it in the restore point, although discovery ran before the resource
@@ -195,7 +193,7 @@ late-captured copy replaces the discovered one, so they may stay on the cluster 
 **Why the PVC must be deleted after each backup.** A staging PVC left on the cluster is
 discovered by the next backup and snapshotted **before** the next `backupPrehook` writes a new
 dump. The restore point would hold the old dump. Kasten enforces the deletion twice (verified in
-the `9.0.10` source, `k10/kio/exec/phases/backup/late_capture.go`):
+the `9.0.10` and `9.0.11` source, `k10/kio/exec/phases/backup/late_capture.go`):
 
 1. **After `backupPosthook` (step 4e)** — `GET` on each declared PVC name. `NotFound` or a set
    `deletionTimestamp` passes; a PVC still present fails the backup with *"Late-captured PVC was
@@ -347,7 +345,7 @@ The following describes the backup and restore workflow:
 - BackupAction.preHook 
 - for each resource in the namespace
   - Resource.backupPrehook 
-  - Late capture of the resources declared in `lateCapture*` artifacts (Kasten 9.0.10+, flag on)
+  - Late capture of the resources declared in `lateCapture*` artifacts (Kasten 9.0.11+)
   - Owned PVCs snapshot start OR Resource.backupHook starts if defined (one excludes the other; see the previous section)
   - Owned PVCs snapshot ready OR Resource.backupHook finish if defined (one excludes the other; see the previous section)
   - Resource.backupPosthook 
@@ -508,7 +506,7 @@ A Kasten Action (BackupAction, RestoreAction, or ExportAction — ImportAction d
 > action hooks (and where each sits in the lifecycle) is documented in
 > [Reserved Action Names → Resource-Bound Actions and Action Hooks](https://docs.kasten.io/latest/kanister/reference/action-names#resource-bound-actions-and-action-hooks).
 > Action-hook `preHook` runs at the **namespace level, before PVC discovery** — see
-> [Phase Lifecycle → Namespace-Level Backup Phases](https://docs.kasten.io/latest/kanister/reference/phase-lifecycle#namespace-level-backup-phases) — which is why, before Kasten 9.0.10, it was the only place a temporary PVC could be created and still captured. From 9.0.10, a resource-bound `backupPrehook` can declare it for [late capture](#late-capture--hook-created-resources-in-the-restore-point) instead.
+> [Phase Lifecycle → Namespace-Level Backup Phases](https://docs.kasten.io/latest/kanister/reference/phase-lifecycle#namespace-level-backup-phases) — which is why, before Kasten 9.0.11, it was the only place a temporary PVC could be created and still captured. From 9.0.11, a resource-bound `backupPrehook` can declare it for [late capture](#late-capture--hook-created-resources-in-the-restore-point) instead.
 
 Any action name is valid for action hooks. Recommended convention:
 
@@ -705,7 +703,7 @@ dump pattern is cheap.
 A resource (PVC, ConfigMap, custom resource such as a `cnpg.io` `Backup`) created during a
 resource-bound `backupPrehook` is not discovered, because discovery runs first. It reaches the
 restore point only if the hook declares it for [late capture](#late-capture--hook-created-resources-in-the-restore-point)
-(Kasten 9.0.10+), or if it is created in a BackupAction preHook instead.
+(Kasten 9.0.11+), or if it is created in a BackupAction preHook instead.
 
 
 
@@ -1034,7 +1032,7 @@ actions:
 
 ### 6. Logical Dump or Full Database Snapshot on a Staging PVC (Late Capture)
 
-> ⚠️ Kasten `9.0.10` or later with `features.lateCapture=true`. Without the flag the backup
+> ⚠️ Kasten `9.0.11` or later. On an older Kasten the backup
 > succeeds and holds **no dump** — see [Late Capture](#late-capture--hook-created-resources-in-the-restore-point).
 
 - **Principle**: `backupPrehook` creates a staging PVC with `KubeOps`, writes a full dump (or a
@@ -1056,7 +1054,7 @@ actions:
 - **Cons**: No incrementality in the local snapshot (the volume is new each time); only the
   export deduplicates. Cannot hold an incremental chain. A PVC left by a crashed or cancelled
   backup fails the next backup until someone deletes it. Needs a blueprint bound to a resource
-  that owns pods, so not an external database bound to a ConfigMap. Needs Kasten 9.0.10+.
+  that owns pods, so not an external database bound to a ConfigMap. Needs Kasten 9.0.11+.
 - **BlueprintBinding**: Yes — attach to the workload.
 - **Filter PVC**: Yes — exclude the database PVCs and keep only the staging PVC. The filter must
   not match the staging PVC: late capture fails the backup if the policy excludes a declared PVC.
@@ -1066,7 +1064,7 @@ actions:
 - **Principle**: When no extra PVC is acceptable and the dump can safely coexist on the database volumes without exhausting storage.
 - **Example**: no example
 - **Pro**: No change of the workload configuration, no creation of extra storage.
-- **Cons**: This is dangerous for the database storage and putting the data on an extra PVC should always be preferred when possible. With Kasten 9.0.10+, pattern 6 almost always replaces it.
+- **Cons**: This is dangerous for the database storage and putting the data on an extra PVC should always be preferred when possible. With Kasten 9.0.11+, pattern 6 almost always replaces it.
 - **BlueprintBinding**: Yes — attach to the workload CR.
 - **Filter PVC**: No — you must take all the database PVCs.
 
@@ -1075,8 +1073,8 @@ actions:
 ### Action-Hook Patterns — Temporary PVC Created Before Discovery
 
 > ⚠️ **Patterns 8, 9, and 10 create a PVC during the action `preHook`, which runs before the
-> discovery of the namespace.** Before Kasten 9.0.10 this was the only way to capture a PVC
-> created for the backup. **With Kasten 9.0.10+ and late capture, use pattern 6 instead**, except
+> discovery of the namespace.** Before Kasten 9.0.11 this was the only way to capture a PVC
+> created for the backup. **With Kasten 9.0.11+ and late capture, use pattern 6 instead**, except
 > for an external database (pattern 10), where no workload in the cluster owns pods for the
 > blueprint to bind to.
 >
@@ -1104,7 +1102,7 @@ actions:
 - **Principle**: Create a temporary PVC inside a BackupAction preHook (before PVC discovery) and write the database snapshot to it. Kasten discovers and snapshots the PVC, then the `backupPosthook` (or `onSuccess` hook) deletes the temporary PVC.
 - **Example**: no example
 - **Pro**: Captures a PVC created for the backup on Kasten versions without late capture.
-- **Cons**: The PVC is new and empty at every backup, so the snapshot tool cannot append to the previous one: this is a full snapshot each time, not an incremental one. Requires a BackupAction preHook; BlueprintBinding cannot be used. See warning above. With Kasten 9.0.10+, use pattern 6.
+- **Cons**: The PVC is new and empty at every backup, so the snapshot tool cannot append to the previous one: this is a full snapshot each time, not an incremental one. Requires a BackupAction preHook; BlueprintBinding cannot be used. See warning above. With Kasten 9.0.11+, use pattern 6.
 - **BlueprintBinding**: No — must use BackupAction preHook.
 - **Filter PVC**: Yes — you can take only the temporary PVC.
 
@@ -1113,7 +1111,7 @@ actions:
 - **Principle**: Create a temporary PVC inside a BackupAction preHook and write the logical dump to it. Kasten discovers and snapshots the PVC, then the `onSuccess` hook deletes it.
 - **Example**: [Mongoce](https://github.com/kastendevhub/enterprise-blueprint/tree/main/maximo/mongoce)
 - **Pro**: A dump enables granular restore.
-- **Cons**: No incrementality — as the dump grows over time, backup time grows too. Requires a BackupAction preHook; BlueprintBinding cannot be used. See warning above. With Kasten 9.0.10+, use pattern 6.
+- **Cons**: No incrementality — as the dump grows over time, backup time grows too. Requires a BackupAction preHook; BlueprintBinding cannot be used. See warning above. With Kasten 9.0.11+, use pattern 6.
 - **BlueprintBinding**: No — must use BackupAction preHook.
 - **Filter PVC**: Yes — you can take only the temporary PVC.
 

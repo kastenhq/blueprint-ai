@@ -82,7 +82,7 @@ it was not measured for PostgreSQL.
 
 | Component | Version |
 |---|---|
-| Kubernetes | `1.35.8` (EKS) |
+| Kubernetes | `1.35.9` (EKS) |
 | Kasten | `9.0.11` |
 | Helm chart | `bitnami/postgresql 16.7.27` |
 | Database | `PostgreSQL 17.6` (`bitnamilegacy/postgresql:17.6.0-debian-12-r4`), `standalone` architecture |
@@ -174,6 +174,8 @@ helm uninstall postgres -n postgresql-logical
 kubectl delete pvc -n postgresql-logical --all        # Helm leaves the data PVC
 kubectl delete namespace postgresql-logical
 kubectl delete policy postgresql-logical-backup -n kasten-io
+kubectl delete blueprintbinding postgresql-logical-late-capture-binding -n kasten-io
+kubectl delete blueprint postgresql-logical-late-capture-blueprint -n kasten-io
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=postgresql-logical
 ```
 
@@ -286,7 +288,7 @@ the cluster uses.
 3. **Restore** (in place):
 
    ```bash
-   kubectl get restorepoint -n postgresql-logical
+   kubectl get restorepoint -n postgresql-logical   # use the local one, scheduled-<id>; the exported copy adds a suffix
    kubectl create -f - --validate=false <<EOF
    apiVersion: actions.kio.kasten.io/v1alpha1
    kind: RestoreAction
@@ -342,9 +344,9 @@ EOF
 
 Then run the same RestoreAction as above with `name: postgresql-logical-restored`.
 
-Tested on Kasten 9.0.10: the in-place restore and the restore after deleting the namespace (from
-the exported restore point) both brought back the 4 rows, and a new backup after the second restore
-completed (the restored staging PVC had been deleted).
+Tested on Kasten 9.0.11, with no feature flag: the in-place restore and the restore after deleting
+the namespace (from the exported restore point) both brought back the 4 rows, and a new backup after
+the second restore completed (the restored staging PVC had been deleted).
 
 ---
 
