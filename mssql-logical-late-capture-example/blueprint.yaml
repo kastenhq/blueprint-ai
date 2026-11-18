@@ -1,9 +1,7 @@
 # Logical Microsoft SQL Server backup on a staging PVC, captured by Kasten late capture.
 #
-# Requires Kasten 9.0.10 or later with the lateCapture feature flag:
-#   helm upgrade k10 kasten/k10 -n kasten-io --reuse-values --set features.lateCapture=true
-# Without the flag Kasten only logs a warning and ignores the lateCapture artifact: the staging
-# PVC is created, never snapshotted, then deleted, and the restore point holds no dump.
+# Requires Kasten 9.0.11 or later. An older Kasten does not act on the lateCapture artifact: the
+# staging PVC is created, never snapshotted, then deleted, and the restore point holds no dump.
 #
 # SQL Server writes a .bak file on its own filesystem; the staging PVC cannot be mounted into the
 # running SQL Server pod. The backup is therefore written to /tmp in the SQL Server container
@@ -59,7 +57,7 @@ actions:
         name: dumpDatabases
         args:
           namespace: "{{ .Deployment.Namespace }}"
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.10
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           # kubectl exec into the SQL Server pod, in this namespace only (rbac.yaml).
           serviceaccount: mssql-logical-backup
           volumes:
@@ -131,7 +129,7 @@ actions:
         name: restoreDatabases
         args:
           namespace: "{{ .Deployment.Namespace }}"
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.10
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           serviceaccount: mssql-logical-backup
           volumes:
             "{{ .ArtifactsIn.lateCapture.KeyValue.name }}": /backup

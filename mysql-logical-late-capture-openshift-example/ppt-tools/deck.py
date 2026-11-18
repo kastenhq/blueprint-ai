@@ -28,12 +28,12 @@ d.hero(
     "DISCOVERY RUNS", "BEFORE THE HOOK",
     body="Kasten lists the PVCs to snapshot before backupPrehook runs.\nA PVC the hook "
          "creates was never discovered, so it never reached the restore point.",
-    pills=["Until Kasten 9.0.10", "Action hook was the only way", "One blueprint per namespace"],
+    pills=["Before Kasten 9.0.11", "Action hook was the only way", "One blueprint per namespace"],
     icon='search', polarity='neg')
 
 d.cards(
     "Late capture: the hook declares what it created",
-    "Kasten 9.0.10 or later, with features.lateCapture=true",
+    "Kasten 9.0.11 or later",
     [
         ('file_list', "A DECLARATION, NOT A SCAN", [
             "backupPrehook emits an output artifact whose name starts with lateCapture: "
@@ -50,8 +50,8 @@ d.cards(
             "workload: BlueprintBinding works, and several workload types can share a "
             "namespace.",
         ]),
-        ('error_warning', "FLAG OFF = NO DUMP", [
-            "Without the flag Kasten only logs a warning and ignores the declaration. "
+        ('error_warning', "OLDER KASTEN = NO DUMP", [
+            "Before 9.0.11 Kasten does not act on the declaration. "
             "The PVC is created, never snapshotted, deleted — and the backup is green.",
         ]),
     ],
@@ -159,19 +159,19 @@ d.cards(
 
 d.table_slide(
     "Versions",
-    "Late capture needs Kasten 9.0.10 or later — and the feature flag",
+    "Late capture needs Kasten 9.0.11 or later",
     ["Component", "Version"],
     [
         ("OpenShift", "4.21.30 (bare metal, ODF)"),
-        ("Kasten", "9.0.10 operator, lateCapture=true"),
+        ("Kasten", "9.0.11 operator"),
         ("Template", "mysql-ephemeral, 8.0-el8"),
         ("Database", "MySQL 8.0.45 (RHEL 8)"),
     ],
     col_widths=[3.3, 2.55],
     row_heights=[0.55] * 5,
     side=('settings', "BEFORE YOU USE IT",
-          "Check the flag: kubectl get cm k10-features -n kasten-io must show "
-          "lateCapture: true.\n"
+          "Check the version: the Kasten operator CSV must show 9.0.11 "
+          "or later.\n"
           "The staging PVC needs a CSI storage class that supports snapshots, in "
           "Filesystem mode.\n"
           "The policy needs a Location profile, and must export: local snapshots are "

@@ -1,9 +1,7 @@
 # Logical MongoDB backup on a staging PVC, captured by Kasten late capture.
 #
-# Requires Kasten 9.0.10 or later with the lateCapture feature flag:
-#   helm upgrade k10 kasten/k10 -n kasten-io --reuse-values --set features.lateCapture=true
-# Without the flag Kasten only logs a warning and ignores the lateCapture artifact: the staging
-# PVC is created, never snapshotted, then deleted, and the restore point holds no dump.
+# Requires Kasten 9.0.11 or later. An older Kasten does not act on the lateCapture artifact: the
+# staging PVC is created, never snapshotted, then deleted, and the restore point holds no dump.
 apiVersion: cr.kanister.io/v1alpha1
 kind: Blueprint
 metadata:

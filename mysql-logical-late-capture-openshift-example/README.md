@@ -1,22 +1,19 @@
 # Kasten Blueprint — Logical MySQL Backup on a Staging PVC (Late Capture), OpenShift
 
-> ⚠️ **Kasten `9.0.10` or later, with the `lateCapture` feature flag on.**
+> ⚠️ **Kasten `9.0.11` or later.**
 >
 > ```bash
-> # Kasten installed by the OpenShift operator (OLM): set the flag in the K10 custom resource
-> kubectl patch k10 k10 -n kasten-io --type merge -p '{"spec":{"features":{"lateCapture":true}}}'
+> # Kasten installed by the OpenShift operator (OLM)
+> kubectl get csv -n kasten-io -o jsonpath='{.items[?(@.spec.displayName=="Kasten K10")].spec.version}'
 > # Kasten installed with Helm
-> helm upgrade k10 kasten/k10 -n kasten-io --version 9.0.10 --reuse-values --set features.lateCapture=true
->
-> kubectl get cm k10-features -n kasten-io -o jsonpath='{.data.lateCapture}'   # must print: true
+> helm ls -n kasten-io
 > ```
 >
-> **Without the flag, the backup succeeds and holds no dump.** Kasten only logs the warning
-> *"Late-capture declarations present but the lateCapture feature flag is not set; ignoring
-> them"*. The staging PVC is created, never snapshotted, then deleted by `backupPosthook`. Check
-> the flag before you rely on this blueprint. If Kasten is deployed by a GitOps tool (Argo CD, for
-> example), change the version and the flag in its source, not on the cluster: the tool would undo
-> the change, and undoing a version change is a Kasten downgrade.
+> **On an older Kasten, the backup succeeds and holds no dump.** Kasten does not act on the
+> `lateCapture` artifact: the staging PVC is created, never snapshotted, then deleted by
+> `backupPosthook`. Check the version before you rely on this blueprint. If Kasten is deployed by a
+> GitOps tool (Argo CD, for example), upgrade it in the tool's source, not on the cluster: the tool
+> would undo the change, and undoing an upgrade is a Kasten downgrade.
 
 A logical backup (`mysqldump` / `mysql`) of **MySQL deployed on OpenShift with the
 `mysql-ephemeral` template** (a `DeploymentConfig`). It is the late-capture version of the Kasten
@@ -84,7 +81,7 @@ MySQL.
 | Component | Version |
 |---|---|
 | OpenShift | `4.21.30` (bare metal, OpenShift Data Foundation) |
-| Kasten | `9.0.10` (OpenShift operator), `features.lateCapture=true` |
+| Kasten | `9.0.11` (OpenShift operator) |
 | Template | `mysql-ephemeral` from `openshift/origin` (`master`), `MYSQL_VERSION=8.0-el8` |
 | Database | `MySQL 8.0.45` (`registry.redhat.io/rhel8/mysql-80`) |
 
@@ -111,7 +108,7 @@ still enabled on 4.21. For a new deployment, prefer a `Deployment`; the blueprin
 
 ## Prerequisites
 
-- Kasten `9.0.10`+ with `features.lateCapture=true` (see the top of this page).
+- Kasten `9.0.11` or later (see the top of this page).
 - A storage class backed by a **CSI driver that supports snapshots**, with a matching
   `VolumeSnapshotClass` registered with Kasten.
 - A **Location** profile for the policy (not an `Infra` profile): the `lateCapture` artifact is
@@ -386,8 +383,8 @@ oc delete pvc mysql-dump -n mysql-logical
 **`Late-captured PVC is excluded by the policy's resource filters`.** The policy filter matches the
 staging PVC. Do not give the staging PVC the labels the filter uses.
 
-**The backup succeeds but the restore finds no `dump.sql.gz`.** Check the feature flag (top of this
-page).
+**The backup succeeds but the restore finds no `dump.sql.gz`.** Check the Kasten
+version (top of this page): before `9.0.11`, Kasten does not act on the `lateCapture` artifact.
 
 ---
 

@@ -1,16 +1,14 @@
 # Kasten Blueprint — Logical PostgreSQL Backup on a Staging PVC (Late Capture)
 
-> ⚠️ **Kasten `9.0.10` or later, with the `lateCapture` feature flag on.**
+> ⚠️ **Kasten `9.0.11` or later.**
 >
 > ```bash
-> helm upgrade k10 kasten/k10 -n kasten-io --version 9.0.10 --reuse-values --set features.lateCapture=true
-> kubectl get cm k10-features -n kasten-io -o jsonpath='{.data.lateCapture}'   # must print: true
+> helm ls -n kasten-io   # APP VERSION must be 9.0.11 or later
 > ```
 >
-> **Without the flag, the backup succeeds and holds no dump.** Kasten only logs the warning
-> *"Late-capture declarations present but the lateCapture feature flag is not set; ignoring
-> them"*. The staging PVC is created, never snapshotted, then deleted by `backupPosthook`. Check
-> the flag before you rely on this blueprint.
+> **On an older Kasten, the backup succeeds and holds no dump.** Kasten does not act on the
+> `lateCapture` artifact: the staging PVC is created, never snapshotted, then deleted by
+> `backupPosthook`. Check the version before you rely on this blueprint.
 
 A logical backup (`pg_dumpall` / `psql`) of **PostgreSQL deployed with the Bitnami Helm chart**. It
 is the late-capture version of the Kasten documentation example
@@ -85,7 +83,7 @@ it was not measured for PostgreSQL.
 | Component | Version |
 |---|---|
 | Kubernetes | `1.35.8` (EKS) |
-| Kasten | `9.0.10`, `features.lateCapture=true` |
+| Kasten | `9.0.11` |
 | Helm chart | `bitnami/postgresql 16.7.27` |
 | Database | `PostgreSQL 17.6` (`bitnamilegacy/postgresql:17.6.0-debian-12-r4`), `standalone` architecture |
 
@@ -104,7 +102,7 @@ it was not measured for PostgreSQL.
 
 ## Prerequisites
 
-- Kasten `9.0.10`+ with `features.lateCapture=true` (see the top of this page).
+- Kasten `9.0.11` or later (see the top of this page).
 - A storage class backed by a **CSI driver that supports snapshots**, with a matching
   `VolumeSnapshotClass` registered with Kasten.
 - A **Location** profile for the policy (not an `Infra` profile): the `lateCapture` artifact is
@@ -377,8 +375,8 @@ shows the `psql` errors. A common cause is a database that has active connection
 application during the replay: `DROP DATABASE` fails. Scale the application down before the
 restore.
 
-**The backup succeeds but the restore finds no `dump.sql.gz`.** Check the feature flag (top of this
-page).
+**The backup succeeds but the restore finds no `dump.sql.gz`.** Check the Kasten
+version (top of this page): before `9.0.11`, Kasten does not act on the `lateCapture` artifact.
 
 ---
 

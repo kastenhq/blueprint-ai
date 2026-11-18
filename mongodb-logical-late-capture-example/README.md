@@ -1,16 +1,14 @@
 # Kasten Blueprint — Logical MongoDB Backup on a Staging PVC (Late Capture)
 
-> ⚠️ **Kasten `9.0.10` or later, with the `lateCapture` feature flag on.**
+> ⚠️ **Kasten `9.0.11` or later.**
 >
 > ```bash
-> helm upgrade k10 kasten/k10 -n kasten-io --version 9.0.10 --reuse-values --set features.lateCapture=true
-> kubectl get cm k10-features -n kasten-io -o jsonpath='{.data.lateCapture}'   # must print: true
+> helm ls -n kasten-io   # APP VERSION must be 9.0.11 or later
 > ```
 >
-> **Without the flag, the backup succeeds and holds no dump.** Kasten only logs the warning
-> *"Late-capture declarations present but the lateCapture feature flag is not set; ignoring
-> them"*. The staging PVC is created, never snapshotted, then deleted by `backupPosthook`. Check
-> the flag before you rely on this blueprint.
+> **On an older Kasten, the backup succeeds and holds no dump.** Kasten does not act on the
+> `lateCapture` artifact: the staging PVC is created, never snapshotted, then deleted by
+> `backupPosthook`. Check the version before you rely on this blueprint.
 
 A logical backup (`mongodump` / `mongorestore`) of **MongoDB deployed with the Bitnami Helm chart**
 in `replicaset` architecture. It is the late-capture version of the Kasten documentation example
@@ -64,7 +62,7 @@ empty namespace, MongoDB starts on **new, empty volumes** and the dump rebuilds 
 | Component | Version |
 |---|---|
 | Kubernetes | `1.35.8` (EKS) |
-| Kasten | `9.0.10`, `features.lateCapture=true` |
+| Kasten | `9.0.11` |
 | Helm chart | `bitnami/mongodb 20.0.17` |
 | Database | `MongoDB 8.0.11` (`bitnamilegacy/mongodb:8.0.11-debian-12-r1`), replica set `rs0`: 2 data members + 1 arbiter |
 
@@ -83,7 +81,7 @@ empty namespace, MongoDB starts on **new, empty volumes** and the dump rebuilds 
 
 ## Prerequisites
 
-- Kasten `9.0.10`+ with `features.lateCapture=true` (see the top of this page).
+- Kasten `9.0.11` or later (see the top of this page).
 - A storage class backed by a **CSI driver that supports snapshots**, with a matching
   `VolumeSnapshotClass` registered with Kasten. The staging PVC must use `Filesystem` volume mode
   (the default).
@@ -411,8 +409,8 @@ kubectl delete pvc mongo-logical-mongodb-dump -n mongodb-logical
 **`Late-captured PVC is excluded by the policy's resource filters`.** The policy filter matches the
 staging PVC. Do not give the staging PVC the labels the filter uses.
 
-**The backup succeeds but the restore finds no `rs_backup.gz`.** Check the feature flag
-(top of this page).
+**The backup succeeds but the restore finds no `rs_backup.gz`.** Check the Kasten
+version (top of this page): before `9.0.11`, Kasten does not act on the `lateCapture` artifact.
 
 ---
 

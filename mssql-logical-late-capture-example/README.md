@@ -1,16 +1,14 @@
 # Kasten Blueprint — Logical SQL Server Backup on a Staging PVC (Late Capture)
 
-> ⚠️ **Kasten `9.0.10` or later, with the `lateCapture` feature flag on.**
+> ⚠️ **Kasten `9.0.11` or later.**
 >
 > ```bash
-> helm upgrade k10 kasten/k10 -n kasten-io --version 9.0.10 --reuse-values --set features.lateCapture=true
-> kubectl get cm k10-features -n kasten-io -o jsonpath='{.data.lateCapture}'   # must print: true
+> helm ls -n kasten-io   # APP VERSION must be 9.0.11 or later
 > ```
 >
-> **Without the flag, the backup succeeds and holds no dump.** Kasten only logs the warning
-> *"Late-capture declarations present but the lateCapture feature flag is not set; ignoring
-> them"*. The staging PVC is created, never snapshotted, then deleted by `backupPosthook`. Check
-> the flag before you rely on this blueprint.
+> **On an older Kasten, the backup succeeds and holds no dump.** Kasten does not act on the
+> `lateCapture` artifact: the staging PVC is created, never snapshotted, then deleted by
+> `backupPosthook`. Check the version before you rely on this blueprint.
 
 A logical backup (`BACKUP DATABASE` / `RESTORE DATABASE`) of **Microsoft SQL Server running as a
 Deployment**. It is the late-capture version of the Kasten documentation example
@@ -117,9 +115,9 @@ not measured for SQL Server.
 | Component | Version |
 |---|---|
 | Kubernetes | `1.35.8` (EKS) |
-| Kasten | `9.0.10`, `features.lateCapture=true` |
+| Kasten | `9.0.11` |
 | Database | `SQL Server 2019 CU27` (`mcr.microsoft.com/mssql/server:2019-CU27-ubuntu-20.04`), Developer edition |
-| Tools image | `ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.10` ([Dockerfile](../images/kasten-tools/Dockerfile)) |
+| Tools image | `ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11` ([Dockerfile](../images/kasten-tools/Dockerfile)) |
 
 No operator and no Helm chart: plain manifests, as in the documentation example.
 
@@ -144,7 +142,7 @@ and adapt the `sqlcmd` commands in `blueprint.yaml`.
 
 ## Prerequisites
 
-- Kasten `9.0.10`+ with `features.lateCapture=true` (see the top of this page).
+- Kasten `9.0.11` or later (see the top of this page).
 - A storage class backed by a **CSI driver that supports snapshots**, with a matching
   `VolumeSnapshotClass` registered with Kasten.
 - A **Location** profile for the policy (not an `Infra` profile): the `lateCapture` artifact is
@@ -496,8 +494,8 @@ kubectl delete pvc mssql-deployment-dump -n mssql-logical
 **`Late-captured PVC is excluded by the policy's resource filters`.** The policy filter matches the
 staging PVC. Do not give the staging PVC the labels the filter uses.
 
-**The backup succeeds but the restore finds no `.bak` file.** Check the feature flag (top of this
-page).
+**The backup succeeds but the restore finds no `.bak` file.** Check the Kasten
+version (top of this page): before `9.0.11`, Kasten does not act on the `lateCapture` artifact.
 
 ---
 
