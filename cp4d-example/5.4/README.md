@@ -6,7 +6,8 @@ Back up **Cloud Pak for Data analytics projects** (notebooks, jobs, data assets,
 at the **logical / artifact level** using `cpdctl` project export/import, with **Kasten as the
 data mover**. Each CP4D project is exported into its **own PVC**; Kasten snapshots those PVCs.
 Restore is **granular and multi-tenant**: pick the project(s) you want, restore only those PVCs
-into a namespace, and recreate the projects with a script.
+into a new namespace, and the blueprint's restore hook recreates those projects in CP4D. The
+whole restore is done from the Kasten UI.
 
 > This is a **complement** to CP4D's platform-level backup (`cpdbr`), not a replacement. `cpdbr`
 > covers whole-tenant infrastructure DR; this blueprint covers the lane it does not enter —
@@ -64,8 +65,11 @@ unit of granularity = unit of multi-tenant restore**.
   the ConfigMap `cp4d-backup-scripts` in `kasten-io`. A script fix during troubleshooting is one
   `kubectl apply`, with no image rebuild and no new image tag. The image only provides the tools
   (`cpdctl`, `kubectl`, `jq`).
-- **Restore is decoupled from Kasten restore hooks** — a standalone [restore.sh](restore.sh) does
-  the `cpdctl import`. Robust, and it fits the multi-tenant / mass-migration story.
+- **Restore is a Kasten restore hook, run from the UI.** The user restores the PVCs of the projects
+  they want into a new namespace and selects the action `restoreProjects` as the hook to run after
+  the restore. The hook imports each restored PVC into CP4D from a pod. Nobody needs `cpdctl` or a
+  terminal. An existing project is never deleted: if its name is taken, the backup is restored
+  beside it as `<name>-restored-<date>`.
 - **Credentials never fan out**: the CP4D API key lives in a Secret in the CP4D instance namespace (`cpd` by default; NOT
   the backed-up namespace), read cross-namespace by the keeper SA, and rendered into an ephemeral
   `emptyDir`/tmpfs cpdctl config — so it is never captured in any restore point.
@@ -74,8 +78,9 @@ unit of granularity = unit of multi-tenant restore**.
 
 ## Versions
 
-Detected on the cluster where this blueprint was last tested (2026-11-18): a new OpenShift cluster
-on Azure, installed with CP4D 5.4.0 Patch 7, Watson Pipelines and DataStage. The previous
+Detected on the cluster where this blueprint was last tested (2026-11-19, restore hook): a new
+OpenShift cluster on Azure, installed with CP4D 5.4.0 Patch 7, Watson Pipelines and DataStage. The
+2026-11-18 validation ran on a cluster with the same versions. The previous
 validation (2026-10-16) ran on bare metal with Kasten 9.0.7 (OLM) and ODF
 `ocs-storagecluster-ceph-rbd`, after an upgrade from CP4D 5.2.2. It was first developed on OpenShift
 4.18.6 / Kubernetes 1.31.6 / Kasten 8.5.12 / CP4D 5.2.x with `cpdctl` 1.8.244.
@@ -104,13 +109,14 @@ helm ls -n kasten-io                 # Helm
 
 | Path | What |
 |---|---|
-| [blueprint.yaml](blueprint.yaml) | The action blueprint (`backupPrehook`) |
-| [restore.sh](restore.sh) | Host-run restore: recreate a project from a restored PVC |
+| [blueprint.yaml](blueprint.yaml) | The action blueprint (`backupPrehook`, `restoreProjects`) |
 | [images/cp4d-backup/Dockerfile](images/cp4d-backup/Dockerfile) | Keeper image, tools only (cpdctl + kubectl + jq) |
 | [scripts/](scripts/) | The scripts, loaded into the `cp4d-backup-scripts` ConfigMap ([Prerequisite 1b](#1b-load-the-scripts-configmap)) |
 | [scripts/orchestrate.sh](scripts/orchestrate.sh) | Backup orchestrator (enumerate → export pods → prune) |
 | [scripts/export-project.sh](scripts/export-project.sh) | Per-project export → store the zip atomically on the PVC |
-| [scripts/import-project.sh](scripts/import-project.sh) | Import the zip from a restored PVC |
+| [scripts/restore-projects.sh](scripts/restore-projects.sh) | Restore hook orchestrator (refuse the backup namespace → one restore pod per restored PVC) |
+| [scripts/restore-project.sh](scripts/restore-project.sh) | Per-PVC restore: create the project (own name, or `-restored-<date>` if taken), then import |
+| [scripts/import-project.sh](scripts/import-project.sh) | Import the zip from a restored PVC into an existing project |
 | [scripts/cpdctl-login.sh](scripts/cpdctl-login.sh) | Headless cpdctl auth (env creds or cross-ns secret) |
 | [DESIGN.md](../DESIGN.md) | The rationale: why the API path, pattern mapping, what export captures |
 | [DESIGN.pptx](../DESIGN.pptx) | The same rationale as a deck — one slide per DESIGN.md section, full section text in the speaker notes (open with PowerPoint; Keynote refuses the import) |
@@ -131,16 +137,15 @@ helm ls -n kasten-io                 # Helm
 > export CPD_NS=cpd                   # replace cpd with that namespace, for example ibm-cpd
 > ```
 >
-> The blueprint and `restore.sh` cannot read your shell, so they receive the value explicitly:
+> The blueprint cannot read your shell, so it receives the value explicitly:
 >
 > | Where | How it gets `CPD_NS` |
 > |---|---|
 > | Commands in this README | `-n "${CPD_NS}"` |
-> | [blueprint.yaml](blueprint.yaml) (`export CRED_NS="cpd"`) | [Deploy](#deploy) step 1 replaces `cpd` with `${CPD_NS}` when it applies the blueprint |
-> | [restore.sh](restore.sh) (`CRED_NS`, default `cpd`) | Run it as `CRED_NS="${CPD_NS}" ./restore.sh …` |
+> | [blueprint.yaml](blueprint.yaml) (`export CRED_NS="cpd"`, once in each action) | [Deploy](#deploy) step 1 replaces `cpd` with `${CPD_NS}` when it applies the blueprint |
 >
-> If you forget one of them, the keeper or `restore.sh` looks for the credential Secret in `cpd`
-> and fails with `secrets "cp4d-backup-cpdctl-creds" not found`.
+> If you forget, the backup or the restore hook looks for the credential Secret in `cpd` and fails
+> with `secrets "cp4d-backup-cpdctl-creds" not found`.
 >
 > The route is named `cpd` by default whatever the namespace is called. Only if your install uses
 > a custom route name, replace `cpd` in `oc get route cpd`.
@@ -159,11 +164,12 @@ docker buildx build --platform linux/amd64 -t <your-registry>/cp4d-backup:5.4-r3
 
 > Use an **immutable tag** (or `imagePullPolicy: Always`, which the pod specs already set). A reused
 > mutable tag can leave stale layers cached on some nodes → `executable ... not found` errors.
-> Update the image reference in [blueprint.yaml](blueprint.yaml) and [restore.sh](restore.sh).
+> Update the image reference in [blueprint.yaml](blueprint.yaml): it appears twice in each action
+> (`image:` and `export IMAGE=`).
 
 ### 1b. Load the scripts ConfigMap
 
-The blueprint and `restore.sh` run the scripts from the ConfigMap `cp4d-backup-scripts` in
+Both blueprint actions run the scripts from the ConfigMap `cp4d-backup-scripts` in
 `kasten-io`. Create it from the [scripts/](scripts/) folder:
 
 ```bash
@@ -171,11 +177,12 @@ kubectl create configmap cp4d-backup-scripts -n kasten-io --from-file=scripts/ \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Run the same command again after **any** change to a script. The next backup uses the new version;
-there is no image to rebuild. Each backup copies the ConfigMap into `cp4d-projects-backup`, because a
-pod cannot mount a ConfigMap from another namespace; do not edit that copy, it is overwritten.
+Run the same command again after **any** change to a script. The next backup or restore uses the
+new version; there is no image to rebuild. A pod cannot mount a ConfigMap from another namespace,
+so each backup copies the ConfigMap into `cp4d-projects-backup`, and each restore copies it into
+the restore namespace. Do not edit those copies; they are overwritten.
 
-The first line of the `backupPrehook` log names the version that ran:
+The first line of the `backupPrehook` and `restoreProjects` logs names the version that ran:
 
 ```
 scripts from ConfigMap kasten-io/cp4d-backup-scripts: sha256 3f1c0a9e5b27
@@ -491,7 +498,7 @@ kubectl get profile <name> -n kasten-io -o jsonpath='{.spec.type}'   # must prin
 ```bash
 # 1. blueprint (kasten-io), with CRED_NS set to your CP4D instance namespace
 sed "s/export CRED_NS=\"cpd\"/export CRED_NS=\"${CPD_NS}\"/" blueprint.yaml | kubectl apply -f -
-kubectl get blueprint cp4d-projects-backup-bp -n kasten-io -o yaml | grep 'export CRED_NS'   # must show ${CPD_NS}
+kubectl get blueprint cp4d-projects-backup-bp -n kasten-io -o yaml | grep 'export CRED_NS'   # must show ${CPD_NS}, twice
 
 # 2. policy targeting the cp4d-projects-backup namespace, wired to the action hook
 kubectl apply -f - <<'EOF'
@@ -529,75 +536,139 @@ The hook attaches at `spec.actions[].backupParameters.hooks.preHook` = `{bluepri
 |---|---|---|
 | `backupPrehook` | Before Kasten's PVC discovery/snapshot | Runs `orchestrate.sh` from the `cp4d-backup-scripts` ConfigMap, after copying that ConfigMap into the backup namespace for the export pods: authenticates cpdctl (cross-ns secret), enumerates **all** CP4D analytics projects, **enrols itself as editor on any project it is not already a member of** (aborting before any data moves if that fails), ensures one permanent GUID-keyed PVC per project, launches one export pod per project (bounded concurrency, one retry; each pod stores the export zip atomically in `/backup/current/export.zip` and flushes the filesystem; a failed pod is detected at once, not after `EXPORT_TIMEOUT`), prunes PVCs of deleted projects, deletes export pods so nothing sensitive is captured. Exits non-zero (fails the whole backup) if any project fails to enrol or export. |
 
-> There is **no restore action in the blueprint**. Restore is deliberately handled by the
-> standalone [restore.sh](restore.sh), not a Kasten restore hook — more robust and a better fit for
-> the multi-tenant / mass-migration story. (This also sidesteps the `restorePrehook`-not-triggered
-> limitation of resource-bound blueprints in Kasten ≤ 8.5.x.)
+| `restoreProjects` | Selected by the user as the hook to run **after a successful restore** (Kasten UI restore form; API: `RestoreAction` `spec.hooks.onSuccess`). Runs in the restore's **target** namespace | Runs `restore-projects.sh` from the ConfigMap. **Refuses to run** in a namespace that this blueprint backs up: a policy whose `preHook` uses this blueprint selects it, or it contains the `cp4d-backup-keeper` ServiceAccount. Finds the restored project PVCs (label `app.kubernetes.io/managed-by=cp4d-projects-backup`), copies the scripts and a temporary credential Secret into the namespace, and starts one restore pod per PVC (4 at a time, restricted security context). Each pod recreates its project under its own name, or as `<name>-restored-<date>` when that name is taken, then imports the zip. On success the PVC is annotated `cp4d.io/restored-as`, so a second run of the hook skips it. The temporary Secret is always deleted. Exits non-zero (fails the restore) if the namespace is refused, holds no project PVC, or any project fails. |
 
 ---
 
 ## Restore
 
-Restore is two steps: (1) Kasten restores the **selected** PVC(s) into a namespace of your choice;
-(2) [restore.sh](restore.sh) recreates the CP4D project from each restored PVC. Different users can
-restore different projects into different namespaces — the multi-tenant story.
+The whole restore is done in the **Kasten UI**. Nobody needs `cpdctl`, `kubectl` or a terminal.
 
-### Step 1 — restore only the PVC(s) you want (Kasten, cross-namespace)
+1. Kasten restores the PVCs of the projects you want into a **new namespace**.
+2. The blueprint action `restoreProjects`, selected as the hook to run after the restore, recreates
+   each of those projects in CP4D.
+
+Different users can restore different projects into different namespaces at the same time.
+
+### What happens to each project
+
+| The project in CP4D | What the restore does |
+|---|---|
+| Was deleted | Recreated under **its own name**, with a new id |
+| Still exists (same name) | **Not touched.** The backup is restored **beside it** as `<name>-restored-<YYYYMMDD-HHMM>` (UTC). Compare the two, then delete the one you do not want |
+
+A restore never deletes or overwrites a project. If the import of a project fails, the empty
+project the hook just created is deleted again, and the restore is marked **failed**.
+
+> ⚠️ **DataStage Data Sets.** When a project is restored beside the original, both copies point to
+> the same Data Set data on the DataStage engine. Do not run the jobs of the `-restored-` copy while
+> the original still exists. See [Projects containing DataStage flows](#projects-containing-datastage-flows), point 2.
+
+### In the Kasten UI
+
+1. **Applications** → `cp4d-projects-backup` → **Restore**, and pick a restore point.
+2. Restore into a **new namespace**, for example `cp4d-projects-restore`. Never restore into
+   `cp4d-projects-backup` itself (see [Guard](#guard-the-backup-namespace) below).
+3. In the artifacts, **deselect everything, then select only the volumes** of the projects you want.
+   The volume name is `cp4d-<project name>-<first 8 characters of the project id>`. Each volume you
+   select becomes a project in CP4D.
+
+   Do not select any spec (ServiceAccounts, Roles, ConfigMaps, and so on). The hook does not need
+   them. If you restore the ServiceAccount `cp4d-backup-keeper`, the hook refuses to run, because that
+   ServiceAccount marks the backup namespace.
+4. In the hooks, choose the hook to run **after the restore, on success**: blueprint
+   `cp4d-projects-backup-bp`, action `restoreProjects`.
+5. Start the restore. When it is **Completed**, the projects are in CP4D. If it **Failed**, the
+   error shown by Kasten contains the hook's output (see [Troubleshooting a restore](#troubleshooting-a-restore)).
+6. When you have checked the projects, **delete the restore namespace**. It only holds copies of
+   the backup PVCs.
+
+### The same restore with `kubectl`
 
 ```bash
-# list restore points
-kubectl get restorepoint -n cp4d-projects-backup
-RPC=cp4d-projects-backup-<restorepoint-name>     # the cluster-scoped RestorePointContent name
+kubectl get restorepoint -n cp4d-projects-backup        # pick a restore point
+kubectl create ns cp4d-projects-restore
 
-# create the target namespace (each tenant gets their own)
-kubectl create ns john-cp4d-restore
-kubectl label ns john-cp4d-restore pod-security.kubernetes.io/enforce=privileged --overwrite
-
-# restore ONLY the chosen project's PVC into that namespace
 kubectl create -f - <<EOF
 apiVersion: actions.kio.kasten.io/v1alpha1
 kind: RestoreAction
 metadata:
   generateName: restore-cp4d-
-  namespace: john-cp4d-restore          # action ns MUST equal targetNamespace
+  namespace: cp4d-projects-restore          # action ns MUST equal targetNamespace
 spec:
   subject:
     apiVersion: apps.kio.kasten.io/v1alpha1
     kind: RestorePoint
     name: <restorepoint-name>
-    namespace: cp4d-projects-backup      # the source restore point
-  targetNamespace: john-cp4d-restore
+    namespace: cp4d-projects-backup          # the source restore point
+  targetNamespace: cp4d-projects-restore
   filters:
-    includeResources:
-      - resource: persistentvolumeclaims
-        name: cp4d-<project>-<guid>      # select exactly the project(s) you want
+    includeResources:                       # only the PVCs of the projects you want
+      - { resource: persistentvolumeclaims, name: cp4d-<project>-<guid> }
+      - { resource: persistentvolumeclaims, name: cp4d-<other-project>-<guid> }
+  hooks:
+    onSuccess: { blueprint: cp4d-projects-backup-bp, actionName: restoreProjects }
 EOF
 ```
 
-### Step 2 — recreate the CP4D project from the restored PVC
+`onSuccess` runs only when the volume restore succeeded. `{{ .Namespace.Name }}` in the hook is the
+restore's **target** namespace (checked in the Kasten source: `restoreHookNamespace` returns
+`TargetNamespace`).
 
-```bash
-CRED_NS="${CPD_NS}" ./restore.sh <namespace> <pvc> [project-name]
+### Guard: the backup namespace
 
-# example:
-CRED_NS="${CPD_NS}" ./restore.sh john-cp4d-restore cp4d-my-new-project-21a0ff72 "my project (restored)"
+The hook refuses to run in a namespace this blueprint backs up. Restoring every project PVC and
+importing all of them is never what a user wants. Two checks, so that no namespace name is
+hardcoded:
+
+| Check | How |
+|---|---|
+| A Kasten policy whose `preHook` uses this blueprint selects the namespace | The hook reads the policy's own selector. The key `k10.kasten.io/appNamespace` is replaced by `kubernetes.io/metadata.name`, which every namespace carries, and `kubectl` evaluates the result. A policy with no selector covers every namespace. A selector the hook cannot evaluate fails the hook |
+| The namespace contains the ServiceAccount `cp4d-backup-keeper` | Only the backup namespace has it ([Prerequisite 3](#3-namespace-keeper-serviceaccount-and-scoped-rbac)). A restore that selects only volumes does not bring it back |
+
+The refusal reads, in the error of the failed restore:
+
+```
+RESTORE HOOK REFUSED: namespace cp4d-projects-backup is backed up by policy cp4d-projects-backup-policy
 ```
 
-- If `[project-name]` is omitted, the original name stored in the bundle is used.
-- If a project with the target name **already exists**, the matching project(s) are listed and you
-  must **type the exact name to confirm** delete-and-replace (never silent).
-- Requirements on the machine running it: `kubectl` + `cpdctl` (default `./bin/cpdctl` — see
-  [Get `cpdctl` on your workstation](#1-get-cpdctl-on-your-workstation); or point `CPDCTL` at your
-  own binary). It reads the CP4D credentials straight from the Secret in `CRED_NS`, so no profile setup is
-  needed.
-- It copies the `cp4d-backup-scripts` ConfigMap from `kasten-io` into `<namespace>` and runs
-  `import-project.sh` from it, so the restore uses the scripts currently in `kasten-io`.
+The hook runs **after** Kasten has restored the volumes, so it cannot stop Kasten from overwriting
+the PVCs of `cp4d-projects-backup` with older content. This is not a data loss: the next backup
+exports every project again into those PVCs. To forbid such a restore before it starts, add an
+admission policy (for example Kyverno) that denies a `RestoreAction` with
+`targetNamespace: cp4d-projects-backup` to non-admins.
 
-### Guard rail (recommended)
+### Troubleshooting a restore
 
-Forbid restoring INTO the backup namespace (which would clobber the live backup PVCs). Example with
-Kyverno — deny any `RestoreAction`/PVC creation with `targetNamespace: cp4d-projects-backup` from
-non-admins. (V1 is single-admin; add this before multi-tenant.)
+The hook's output is in the Kasten error of a failed restore, and in the `kanister-svc` log, field
+`Pod_Out`:
+
+```bash
+kubectl logs -n kasten-io deploy/kanister-svc --since=30m \
+  | grep -o '"Pod_Out":"[^"]*"' | sed 's/"Pod_Out":"//; s/"$//' | grep -v '^$'
+```
+
+A successful run ends with:
+
+```
+--- cp4d-fixture-05-9ed27dfe (pod restore-332283dd-…, phase Succeeded)
+    no project named 'fixture-05': recreating it under the same name
+    …
+    RESTORED: 'fixture-05' -> 'fixture-05' (ed27bf93-ed2b-41ed-bf30-0bed586ae0af)
+restored 2 of 2 project(s)
+OK: every restored PVC in cp4d-projects-restore was imported into CP4D.
+```
+
+Each restored PVC records what it became, in the annotation `cp4d.io/restored-as`:
+
+```bash
+kubectl get pvc -n cp4d-projects-restore \
+  -o custom-columns=PVC:.metadata.name,RESTORED_AS:.metadata.annotations.cp4d\\.io/restored-as
+```
+
+Kasten can run the hook again after a transient error. A second run skips every PVC that already
+has this annotation, and reuses a restore pod of the previous run that is still running, so a
+project is never imported twice.
 
 ---
 
@@ -633,8 +704,8 @@ cd ..
 
 ### 2. Point `cpdctl` at the cluster
 
-[restore.sh](restore.sh) configures its own throwaway profile from the credential Secret, so this
-step is only needed for the fixture and verification commands below.
+The blueprint configures its own throwaway profile from the credential Secret, so this step is only
+needed for the fixture and verification commands below.
 
 ```bash
 # CP4D web URL and the bootstrap admin credentials
@@ -726,10 +797,42 @@ kubectl get pvc -n cp4d-projects-backup -L cp4d.io/project-id
 kubectl get volumesnapshot -n cp4d-projects-backup
 kubectl get restorepoint -n cp4d-projects-backup
 
-# 3. restore (Step 1 + Step 2 above), then verify the project came back:
-./bin/cpdctl asset search --project-id <new-pid> --type-name notebook   --query '*:*'
-./bin/cpdctl asset search --project-id <new-pid> --type-name data_asset --query '*:*'
+# 3. restore (see Restore above: new namespace, only the project PVCs, hook restoreProjects),
+#    then verify the project came back:
+./bin/cpdctl project list --name <project-name> --match exact
+./bin/cpdctl asset search --project-id <new-pid> --type-name asset --query '*:*'
 ```
+
+**Validated end-to-end on 2026-11-19: restore through the `restoreProjects` hook** (Kasten 9.0.11 /
+OpenShift 4.21.30 on Azure / CP4D 5.4.0 Patch 7 with Watson Pipelines and DataStage 5.4.7, keeper
+image `5.4-r3`, storage `managed-csi`). Seven projects `fixture-01` to `fixture-07`, each with a
+compiled DataStage flow `customers-etl`, its job and a file data asset `marker.csv`; projects 1 to 5
+also had a Watson Pipelines pipeline. The restores were `RestoreAction`s with `spec.hooks.onSuccess`,
+the object the Kasten UI creates. The UI form itself was not part of this run.
+
+| Check | Result |
+|---|---|
+| Backup through a `RunAction` | `Complete`. 7 PVCs, one restore point |
+| Change after the backup | `fixture-02`: flow and job deleted, `marker.csv` replaced by `after-backup.csv`. `fixture-05`: project deleted |
+| Restore of those 2 PVCs into the new namespace `cp4d-projects-restore` | `Complete`. Only the 2 PVCs restored |
+| `fixture-05` (deleted) | Recreated under its own name, new id: flow, job, `marker.csv`, pipeline `pipe-5` |
+| `fixture-02` (still there) | Left as it was (`after-backup.csv`, no flow). `fixture-02-restored-20261119-1254` created beside it with flow, job, `marker.csv`, pipeline `pipe-2` |
+| Restore into `cp4d-projects-backup` | `Failed`, nothing imported: `RESTORE HOOK REFUSED: namespace cp4d-projects-backup is backed up by policy cp4d-projects-backup-policy`. With the ServiceAccount check alone: also refused |
+| Hook run a second time on the same namespace | `already restored by a previous run, as fixture-02 (<id>); skipped`. No second copy |
+| Restore pod | SCC `restricted-v2`, random uid, no PodSecurity warning. The temporary credential Secret is gone at the end |
+
+> **Two bugs found during this run, both fixed before the results above.** A worker node stopped
+> responding in the middle of a restore (an Azure problem, the node came back by itself). The hook
+> failed and Kasten ran it again by itself. That showed:
+>
+> 1. **The hook was not safe to run twice.** A second run would have imported a project already
+>    restored, as a second `-restored-` copy. Fix: the `cp4d.io/restored-as` annotation and the reuse
+>    of a running pod (see [Troubleshooting a restore](#troubleshooting-a-restore)).
+> 2. **`cpdctl` panics without a writable home directory.** Under the restricted SCC the pod runs
+>    with a random uid and `HOME=/`, and `cpdctl` stops with
+>    `panic: configuration error: mkdir /.bluemix: permission denied`. Fix: `HOME=/tmp` in the pod.
+>    The first run had worked only because the pod, created by Kasten's ServiceAccount, had received
+>    a privileged SCC and run as root.
 
 **Validated end-to-end on 2026-11-18: export stored as a zip, scripts from the ConfigMap, fail-fast
 wait** (Kasten 9.0.11 / OpenShift 4.21.30 on Azure / CP4D 5.4.0 Patch 7 with Watson Pipelines and
@@ -746,7 +849,7 @@ Pipelines pipeline (project 1 had two), projects 6 and 7 had none.
 | `unzip` on one of these zips | `replace …/orchestration_flow.<id>.json? … (EOF or read error, treating as "[N]one" ...)`, exit code 1. This is the error of the earlier versions |
 | Change before restore | Project 4: pipeline deleted, DataStage job deleted, `marker.csv` replaced by a `v2-CHANGED` version |
 | Granular restore | A `RestoreAction` filtered to the project 4 PVC restored only that PVC, into a new namespace |
-| `restore.sh` (same name, typed confirmation) | Deleted the changed project, created a new one, `importing /backup/current/export.zip (177066 bytes) … State: completed` |
+| `restore.sh` (same name, typed confirmation; replaced by the `restoreProjects` hook on 2026-11-19) | Deleted the changed project, created a new one, `importing /backup/current/export.zip (177066 bytes) … State: completed` |
 | Data check | Pipeline `pipe-4`, job `customers-etl-job` and flow back; `marker.csv` back to `v1`; the restored job **ran without recompiling** (`5 records exported`, `Completed`) |
 | Fail-fast, a failing export | One line added to `export-project.sh` **in the ConfigMap only** made project 2 exit 1. The pod failed in seconds and did not block the batch. The 6 other projects were exported, project 2 was retried once, and the prehook ended with `BACKUP PREHOOK FAILED: 1 project(s) failed to export: <guid>` |
 
@@ -802,8 +905,9 @@ Consequences:
   namespace **must** be tightly RBAC-restricted. The CP4D API key is *not* in the bundle (it lives
   in the CP4D instance namespace, read cross-namespace, rendered to tmpfs) — only the *connection* credentials inside
   exported projects are.
-- **Hardening / multi-tenant: encrypt.** Set `ENCRYPTION_KEY` (a managed secret) in the blueprint
-  and pass the same key to `restore.sh` (`ENCRYPTION_KEY=… ./restore.sh …`). cpdctl encrypts the
+- **Hardening / multi-tenant: encrypt.** Set `ENCRYPTION_KEY` (a managed secret) in **both**
+  actions of the blueprint, to the same value (`restoreProjects` must decrypt what
+  `backupPrehook` encrypted). cpdctl encrypts the
   masked properties on export and decrypts on import. When tenants self-serve restores into their
   own namespaces, encryption is **not** optional — plaintext would fan credentials out into tenant
   namespaces. At that point store the key in a **KMS** (Azure Key Vault + Secrets Store CSI), never
@@ -903,7 +1007,7 @@ kubectl delete configmap cp4d-backup-scripts -n kasten-io
 
 # backup namespace (per-project PVCs + snapshots) and restore namespaces
 kubectl delete ns cp4d-projects-backup
-kubectl delete ns john-cp4d-restore
+kubectl delete ns cp4d-projects-restore
 
 # credential secret + RBAC in the CP4D instance namespace
 kubectl delete secret cp4d-backup-cpdctl-creds -n "${CPD_NS}"

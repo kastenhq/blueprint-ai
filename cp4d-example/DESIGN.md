@@ -80,9 +80,13 @@ namespace.
   interactive `replace …?` prompt, and the export fails. `cpdctl asset import start --import-file`
   takes the zip unchanged. The cost is incrementality: every backup now stores about the full size
   of the zip. It has not been measured.
-- **Restore is decoupled from Kasten restore hooks** — a standalone [restore.sh](5.4/restore.sh) runs
-  the `cpdctl import`. More robust, and it fits the multi-tenant / mass-migration story where
-  different users restore different projects into different namespaces.
+- **Restore is a Kasten restore hook, run from the UI.** The user restores the PVCs of the projects
+  they want into a new namespace and selects the blueprint action `restoreProjects` as the hook to
+  run after the restore; a pod per PVC runs the `cpdctl import`. Different users can restore
+  different projects into different namespaces. Earlier versions used a script run on a
+  workstation (`restore.sh`), which needed `cpdctl` and a terminal: the people who restore projects
+  work in the UI and did not use it. An existing project is never deleted: when the name is taken,
+  the backup is restored beside it as `<name>-restored-<date>`.
 - **Credentials never fan out.** The CP4D API key lives in a Secret in the `cpd` namespace —
   deliberately *outside* the backed-up namespace — is read cross-namespace by the keeper SA, and is
   rendered into an ephemeral tmpfs `cpdctl` config. It is therefore never captured in any restore

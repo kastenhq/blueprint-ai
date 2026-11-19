@@ -320,7 +320,7 @@ txbox(s, M, dy, CW, In(0.22), "DECISIONS THAT FOLLOW", size=10, bold=True, color
 dy += In(0.3)
 dec = [("Permanent GUID-keyed PVCs", "so CSI block-level dedup works across runs"),
        ("Store the export zip as is", "IBM's format; CP4D 5.4 puts duplicate entries in it"),
-       ("Restore decoupled from Kasten hooks", "a standalone script fits multi-tenant restore"),
+       ("Restore is a hook run from the Kasten UI", "no cpdctl, no terminal; a taken name restores beside"),
        ("Credentials outside the backed-up ns", "never captured in any restore point")]
 dwe = (CW - In(3 * 0.2)) / 4
 for i, (t, sub) in enumerate(dec):

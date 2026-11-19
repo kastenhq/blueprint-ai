@@ -24,14 +24,15 @@ d.agenda([
     "The pattern: an action blueprint, not a workload blueprint",
     "One PVC per project — the whole point",
     "Four design decisions",
-    "Blueprint action",
+    "Blueprint actions",
+    "Restore, from the Kasten UI",
 ])
 
 d.hero(
     "ONE PVC PER PROJECT", "IS THE UNIT OF RESTORE",
     body="PVC equals granularity equals multi-tenant restore. Pick the projects you "
-         "want, restore only\nthose PVCs into a namespace, and recreate the projects "
-         "with a script.",
+         "want, restore only\nthose PVCs into a new namespace, and a restore hook "
+         "recreates the projects.",
     pills=["Granular", "Multi-tenant", "Portable between clusters"],
     icon='folder_directory')
 
@@ -100,11 +101,11 @@ d.cards(
             "cpdctl imports the zip unchanged. The cost: each backup stores about the "
             "full zip, not only what changed.",
         ]),
-        ('loop_left', "RESTORE IS DECOUPLED", [
-            "A standalone restore.sh does the work, rather than a Kasten restore hook.",
+        ('loop_left', "RESTORE FROM THE KASTEN UI", [
+            "A restore hook recreates the projects, so the user needs no cpdctl and no "
+            "terminal.",
             "",
-            "So a restore can select individual projects, and does not depend on "
-            "restore-hook behaviour.",
+            "An existing project is never deleted: a taken name is restored beside it.",
         ]),
         ('lock_password', "CREDENTIALS DO NOT FAN OUT", [
             "The CP4D API key lives in one Secret in the cpd namespace — not copied "
@@ -116,8 +117,8 @@ d.cards(
     body_size=11)
 
 d.table_slide(
-    "Versions and the blueprint action",
-    "One action, and it fails the whole backup rather than protecting some projects quietly",
+    "Versions and the backup action",
+    "It fails the whole backup rather than protecting some projects quietly",
     ["CP4D folder", "Validated with"],
     [
         ("5.4 (5.4.0 Patch 7)", "OpenShift 4.21.30, Kasten 9.0.11, cpdctl 1.10.34, keeper image cp4d-backup:5.4-r3"),
@@ -139,6 +140,35 @@ d.table_slide(
           "Deletes the export pods, so nothing sensitive is left to be captured.\n"
           "Exits non-zero — failing the whole backup — if any project fails to enrol "
           "or export."))
+
+d.cards(
+    "Restore, from the Kasten UI",
+    "Two actions in one form: restore the volumes, then run the hook restoreProjects",
+    [
+        ('loop_left', "WHAT THE USER DOES", [
+            "Restore the restore point into a new namespace.",
+            "",
+            "Select only the volumes of the projects wanted, and no spec.",
+            "",
+            "As the hook after a successful restore, choose the action restoreProjects.",
+        ]),
+        ('checkbox_multiple', "WHAT HAPPENS TO EACH PROJECT", [
+            "Deleted project: recreated under its own name.",
+            "",
+            "Project still there: left untouched, the backup is restored beside it as "
+            "<name>-restored-<date>.",
+            "",
+            "A failed import fails the restore, and removes the empty project.",
+        ]),
+        ('shield_check', "WHAT THE HOOK REFUSES", [
+            "A namespace this blueprint backs up: it would import every project.",
+            "",
+            "It reads the policy's own selector, so no namespace name is hardcoded.",
+            "",
+            "Run twice, it skips what is already restored.",
+        ]),
+    ],
+    body_size=11)
 
 d.hero(
     "IT ENROLS ITSELF,", "OR IT REFUSES TO RUN",

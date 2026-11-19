@@ -49,3 +49,41 @@ actions:
               export SCRIPTS_CM="cp4d-backup-scripts"           # copied into BACKUP_NS for the export pods
               export SCRIPTS_NS="kasten-io"
               /scripts/orchestrate.sh
+
+  # Selected by the user as the POST-RESTORE HOOK of a restore (Kasten UI: restore form ->
+  # post-restore hook -> this blueprint, action restoreProjects; API: RestoreAction
+  # spec.hooks.onSuccess). The user restores the restore point into a NEW namespace and keeps
+  # only the PVCs of the projects they want; this action recreates those projects in CP4D.
+  # It refuses to run in a namespace this blueprint backs up (see restore-projects.sh).
+  restoreProjects:
+    phases:
+      - func: KubeTask
+        name: importRestoredProjects
+        args:
+          namespace: kasten-io          # cluster-wide Kasten SA: read cpd cred secret + run pods in the restore ns
+          image: ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.4-r3
+          podOverride:
+            volumes:
+              - name: scripts
+                configMap: { name: cp4d-backup-scripts, defaultMode: 0755 }
+            containers:
+              - name: container
+                volumeMounts:
+                  - { name: scripts, mountPath: /scripts }
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              export RESTORE_NS="{{ .Namespace.Name }}"         # the namespace the user restored into
+              export IMAGE="ghcr.io/kastenhq/blueprint-ai/cp4d-backup:5.4-r3"
+              export BLUEPRINT="cp4d-projects-backup-bp"        # policies using it mark the backup namespace
+              export KEEPER_SA="cp4d-backup-keeper"
+              export CRED_NS="cpd"                              # same as backupPrehook
+              export CRED_SECRET="cp4d-backup-cpdctl-creds"
+              export MAX_PARALLEL="4"
+              export IMPORT_TIMEOUT="900"                        # seconds per restore pod
+              export ENCRYPTION_KEY=""                          # must match backupPrehook
+              export SCRIPTS_CM="cp4d-backup-scripts"
+              export SCRIPTS_NS="kasten-io"
+              /scripts/restore-projects.sh
