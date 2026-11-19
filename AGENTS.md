@@ -10,6 +10,45 @@ Never use in Kasten blueprints: `KanisterBackupData`, `KanisterRestoreData`, `Ka
 
 ---
 
+## This Repository Is Public
+
+> ⛔ **Nothing from the Kasten source code, ever.** Kasten is closed source. Some contributors
+> (Veeam employees, and agents working for them) can read it; the readers of this repository
+> cannot, and must not learn from it what the source contains. This applies to **everything that
+> becomes public**: files, code comments, commit messages, branch names, PR titles and descriptions,
+> review comments, decks and speaker notes.
+
+Never write:
+
+- a path, package, file, function, type or variable name from the Kasten source (for example
+  `something/late_capture.go`);
+- an excerpt or a paraphrase of the code, or internal names and step numbers that only the code
+  shows;
+- a sentence that says where the knowledge came from: *"verified in the source"*, *"read in the
+  9.0.11 code"*, *"the code checks…"*.
+
+You may write what any Kasten user can see or check:
+
+- behaviour you **tested on a cluster**, with the version;
+- the public documentation (docs.kasten.io) and the release notes;
+- messages Kasten prints in logs, events or an action's `status.error`, quoted exactly;
+- Helm values, CRD fields and annotations that are documented or visible on the cluster.
+
+Reading the source to understand a problem is fine. Write only the **behaviour** into this
+repository. Test it on a cluster and document the test. If you could not test it, say so (*"not
+tested"*) and describe the expected behaviour, without saying where it comes from.
+
+**Git history is public too.** A pushed commit stays readable even after a later commit removes the
+text. Do not put source references in a commit message in the first place. If one reaches a branch,
+merge the PR with **Squash and merge** and rewrite the squash message: on this repository, the
+default squash message is the list of every commit message on the branch, so it would copy the
+reference into `main`.
+
+The same rule covers customer information. See the
+[deck rule](#build-the-concept-deck-do-this-once-the-readme-is-written).
+
+---
+
 ## Reserved Action Names (Annotation / BlueprintBinding Mode)
 
 Kasten only recognizes these names. Any other action name is silently ignored.

@@ -192,8 +192,7 @@ late-captured copy replaces the discovered one, so they may stay on the cluster 
 
 **Why the PVC must be deleted after each backup.** A staging PVC left on the cluster is
 discovered by the next backup and snapshotted **before** the next `backupPrehook` writes a new
-dump. The restore point would hold the old dump. Kasten enforces the deletion twice (verified in
-the `9.0.10` and `9.0.11` source, `k10/kio/exec/phases/backup/late_capture.go`):
+dump. The restore point would hold the old dump. Kasten enforces the deletion twice:
 
 1. **After `backupPosthook` (step 4e)** — `GET` on each declared PVC name. `NotFound` or a set
    `deletionTimestamp` passes; a PVC still present fails the backup with *"Late-captured PVC was
@@ -203,8 +202,7 @@ the `9.0.10` and `9.0.11` source, `k10/kio/exec/phases/backup/late_capture.go`):
    snapshotted at every backup until someone deletes it.
 2. **At capture time (step 4b)** — if discovery already recorded the declared PVC in this backup
    (the PVC existed before the hook), the backup fails with *"Late-captured PVC was snapshotted
-   before the pre-backup hook; its data in this restore point would be stale"*. The same message
-   comes from a commit-time check when the same PVC name appears twice in the snapshot set.
+   before the pre-backup hook; its data in this restore point would be stale"*.
 
 **Leftover PVC after a crash or a cancel.** `backupPosthook` did not run, so the PVC is still
 there. **With a deterministic name, exactly one backup fails, and the next one succeeds.** Tested
