@@ -22,9 +22,13 @@ A folder is a **snapshot of what was validated** on that version. It is not upda
 version moves on. If your version is not listed, start from the nearest folder and re-run the
 validation (Steps 2–5 of [AGENTS.md](../AGENTS.md)) before you rely on it.
 
-One exception: on 2026-11-18 the 5.2 and 4.8 folders received the 5.4 fix (export zip stored as
-is, scripts in a ConfigMap, fail-fast wait) without an end-to-end run on CP4D 5.2 or 4.8. Each of
-those READMEs says what was checked and what was not.
+Two exceptions, applied to the 5.2 and 4.8 folders without an end-to-end run on CP4D 5.2 or 4.8.
+Each of those READMEs says what was checked and what was not:
+
+- 2026-11-18: the export zip is stored as is, the scripts are in a ConfigMap, and a failed export
+  is detected at once.
+- 2026-11-19: restore is done from the Kasten UI through the restore hook `restoreProjects`;
+  `restore.sh` is removed.
 
 CP4D 4.8 is out of IBM support since 31 July 2025; the 4.8 folder exists for installations that
 have not upgraded yet.

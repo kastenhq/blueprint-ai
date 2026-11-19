@@ -808,7 +808,9 @@ OpenShift 4.21.30 on Azure / CP4D 5.4.0 Patch 7 with Watson Pipelines and DataSt
 image `5.4-r3`, storage `managed-csi`). Seven projects `fixture-01` to `fixture-07`, each with a
 compiled DataStage flow `customers-etl`, its job and a file data asset `marker.csv`; projects 1 to 5
 also had a Watson Pipelines pipeline. The restores were `RestoreAction`s with `spec.hooks.onSuccess`,
-the object the Kasten UI creates. The UI form itself was not part of this run.
+the object the Kasten UI creates. The same scenario was then run by hand through the Kasten UI
+restore form (new namespace, volumes only, hook `restoreProjects` after a successful restore) and
+gave the same result.
 
 | Check | Result |
 |---|---|
