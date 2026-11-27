@@ -54,7 +54,7 @@ actions:
                 exit 1
               }
 
-              # Flush the OS page cache so the MinIO writes land on the EBS
+              # Flush the OS page cache so the keeper writes land on the
               # block device before Kasten triggers the CSI snapshot. Without
               # this, freshly-written ES snapshot files can be missing from
               # the captured PVC. See the Couchbase blueprint for the same
@@ -212,7 +212,7 @@ actions:
         name: deleteSnapshot
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.7
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           command:
             - bash
             - -o

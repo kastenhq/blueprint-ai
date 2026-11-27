@@ -17,22 +17,60 @@ Kasten blueprint for CloudNativePG clusters that use **barman-cloud WAL archivin
 
 ## Versions
 
+Exact versions used for the last end-to-end test (backup, restore, recovery cluster, `delete`
+action), on 2026-11-27:
+
 | Component | Version |
 |---|---|
-| Kubernetes | `1.32` (EKS) |
-| Kasten | `8.5.4` |
-| CNPG operator / Helm chart | `1.29.0` / `cloudnative-pg 0.28.0` |
-| PostgreSQL | `18.3` |
-| MinIO | `RELEASE.2025-04-22T22-12-26Z` |
+| Kubernetes | `1.35` (kind, `csi-hostpath-sc` from the CSI hostpath driver) |
+| Kasten | `9.0.11` |
+| CNPG operator | `1.29.0` (release manifest `cnpg-1.29.0.yaml`) |
+| PostgreSQL | `18.3` (`ghcr.io/cloudnative-pg/postgresql:18.3-system-trixie`) |
+| S3 keeper | RustFS `1.0.7` (`rustfs/rustfs:1.0.7`) |
+| S3 client (bucket creation, checks) | AWS CLI `2.42.4` (`amazon/aws-cli:2.42.4`) |
+
+> Detect your own Kasten version with `helm ls -n kasten-io`.
+>
+> The blueprint was first developed on EKS `1.32` with Kasten `8.5.4`, the `cloudnative-pg 0.28.0`
+> Helm chart and a MinIO keeper (`RELEASE.2025-04-22T22-12-26Z`).
+
+### Why the keeper runs RustFS and not MinIO
+
+The MinIO images can no longer be pulled. On 2026-11-27, `quay.io/minio/minio` answered
+`no such manifest`, and `minio/minio` and `minio/mc` on Docker Hub answered
+`denied: requested access to the resource is denied`. A keeper Pod with the old image stays in
+`ImagePullBackOff`.
+
+The keeper now runs [RustFS](https://github.com/rustfs/rustfs), an S3-compatible server under the
+Apache 2.0 license. barman-cloud only needs the S3 API, so nothing changes on the CNPG side. What
+changes in [minio-keeper.yaml](minio-keeper.yaml):
+
+| MinIO | RustFS |
+|---|---|
+| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` (same Secret) |
+| `args: [server, /data, --console-address, ":9001"]` | `args: [/data]`, console disabled |
+| runs as root | runs as uid `10001`: the Pod sets `fsGroup: 10001` so it can write to the PVC |
+| `mc` client (also inside the MinIO Pod) | `aws s3` client (`amazon/aws-cli`); the RustFS image has no `mc` |
+
+The resource names still contain `minio` (`pg-cluster-minio`, label `cnpg-barman-minio`): the
+blueprint finds the CNPG cluster name by removing the `-minio` suffix from the Deployment name, and
+existing deployments keep working with the same binding.
+
+> **Existing MinIO keepers.** Replacing only the image of a running MinIO keeper, so that RustFS
+> reads the MinIO data directory, was **not tested**. See
+> [cnpg-barman-cloud-example](../cnpg-barman-cloud-example/README.md#why-the-keeper-runs-rustfs-and-not-minio)
+> for the recommended way to move.
 
 ## Pattern
 
 **Pattern 5 — Database backup via a local MinIO keeper (vendor operator data mover).**
 
-A dedicated MinIO `Deployment` (the *keeper*) with a permanent PVC stores the CNPG barman archive. The `backupPrehook` blueprint action:
+A dedicated S3 `Deployment` (the *keeper*, running RustFS — see
+[why not MinIO](#why-the-keeper-runs-rustfs-and-not-minio)) with a permanent PVC stores the CNPG barman archive. The `backupPrehook` blueprint action:
 1. Creates a CNPG `Backup` CR to trigger a barman base backup.
 2. Polls until the base backup completes.
 3. Forces a WAL segment switch (`pg_switch_wal()`) so the post-backup checkpoint WAL is flushed to MinIO before Kasten snapshots the PVC.
+4. Runs `sync` in the keeper Pod. A CSI snapshot captures the block device, and files still in the page cache would be missing from it (or present with zero bytes).
 
 Kasten then snapshots the MinIO PVC (and only that PVC — CNPG data PVCs are excluded via policy filter). The MinIO snapshot contains a self-consistent barman archive: a base backup plus all WALs up to the switch.
 
@@ -101,7 +139,7 @@ The CNPG Cluster must carry the label `cnpg-backup-pattern: barman-minio`, which
 
 | Action | Hook | What it does |
 |---|---|---|
-| `backupPrehook` | Before PVC snapshot | Creates CNPG `Backup` CR, waits for completion, forces WAL switch; outputs `backupName` and `namespace` as restore-point artifacts |
+| `backupPrehook` | Before PVC snapshot | Creates CNPG `Backup` CR, waits for completion, forces WAL switch, runs `sync` in the keeper Pod; outputs `backupName` and `namespace` as restore-point artifacts |
 | `delete` | On restore-point deletion | Deletes the CNPG `Backup` CR from the application namespace so the CNPG operator removes the corresponding barman data from MinIO; silently no-ops if the namespace or Backup CR no longer exists |
 
 No restore hooks are implemented — PITR recovery is a **manual procedure** using a CNPG recovery cluster manifest (see [PITR Recovery Procedure](#pitr-recovery-procedure) below).
@@ -111,7 +149,9 @@ No restore hooks are implemented — PITR recovery is a **manual procedure** usi
 ## Prerequisites
 
 - CNPG operator installed (`cloudnative-pg` Helm chart).
-- `ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.4` image available (adds `kubectl` to `gcr.io/kasten-images/kanister-tools:8.5.4`).
+- `ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11` image available (adds `kubectl` to
+  `gcr.io/kasten-images/kanister-tools:9.0.11`, see [../images/kasten-tools/](../images/kasten-tools/)).
+  Use the tag that matches your Kasten version.
 - Blueprint and BlueprintBinding deployed in `kasten-io` namespace.
 - Kasten backup policy configured with the PVC filter described below.
 - The Pattern 1 `cnpg-blueprint-binding` must have the `NotIn: barman-minio` exclusion condition (already present in `cnpg-example/blueprintbinding.yaml`).
@@ -124,11 +164,12 @@ No restore hooks are implemented — PITR recovery is a **manual procedure** usi
 kubectl create namespace cnpg-barman
 ```
 
-### 2. Deploy MinIO keeper
+### 2. Deploy the S3 keeper (RustFS)
 
 Review [minio-keeper.yaml](minio-keeper.yaml) before applying — in particular the `storageClassName` on the PVC, which must be replaced with a CSI storage class that supports snapshots on your cluster.
 
-> **Storage class**: `ebs-sc` is the AWS EBS CSI storage class used in our test environment.
+> **Storage class**: `ebs-sc` is the AWS EBS CSI storage class used in our first test environment
+> (the last test ran on kind with `csi-hostpath-sc`).
 > Replace it with a storage class that supports CSI snapshots on your cluster
 > (e.g. `managed-csi` on AKS, `standard-rwo` on GKE, your custom class on bare-metal, etc.).
 > The class must have a matching `VolumeSnapshotClass` registered with Kasten.
@@ -139,16 +180,19 @@ kubectl apply -f minio-keeper.yaml
 kubectl wait deployment pg-cluster-minio -n cnpg-barman --for=condition=Available --timeout=3m
 ```
 
-### 3. Create the MinIO bucket
+### 3. Create the buckets
+
+Two buckets: `cnpg-backup` for the archive, and `cnpg-backup-recovered` for the recovery cluster
+(see [Step 4 of the recovery](#step-4--create-a-cnpg-recovery-cluster)).
 
 ```bash
-kubectl run mc-init -n cnpg-barman --image=minio/mc:latest --restart=Never --rm -it --command -- \
-  /bin/sh -c "
-    mc alias set local http://pg-cluster-minio:9000 minioadmin minioadmin123
-    mc mb local/cnpg-backup
-    mc mb local/cnpg-backup-recovered
-    mc ls local
-  "
+kubectl run s3-init -n cnpg-barman --image=amazon/aws-cli:2.42.4 --restart=Never --rm -i --command \
+  --env=AWS_ACCESS_KEY_ID=minioadmin --env=AWS_SECRET_ACCESS_KEY=minioadmin123 \
+  --env=AWS_DEFAULT_REGION=us-east-1 -- sh -c '
+    aws --endpoint-url http://pg-cluster-minio:9000 s3 mb s3://cnpg-backup
+    aws --endpoint-url http://pg-cluster-minio:9000 s3 mb s3://cnpg-backup-recovered
+    aws --endpoint-url http://pg-cluster-minio:9000 s3 ls
+  '
 ```
 
 ### 4. Deploy the CNPG cluster
@@ -275,12 +319,11 @@ After a RunAction completes, check:
 # Confirm the Backup CR was created and completed
 kubectl get backups.postgresql.cnpg.io -n cnpg-barman
 
-# Verify base backup and WALs are in MinIO
-MINIO_POD=$(kubectl get pods -n cnpg-barman -l app=pg-cluster-minio -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n cnpg-barman "$MINIO_POD" -- sh -c "
-  mc alias set local http://localhost:9000 minioadmin minioadmin123 2>/dev/null
-  mc ls --recursive local/cnpg-backup/ | tail -20
-"
+# Verify base backup and WALs are in the keeper
+kubectl run s3-chk -n cnpg-barman --image=amazon/aws-cli:2.42.4 --restart=Never --rm -i \
+  --env=AWS_ACCESS_KEY_ID=minioadmin --env=AWS_SECRET_ACCESS_KEY=minioadmin123 \
+  --env=AWS_DEFAULT_REGION=us-east-1 -- \
+  --endpoint-url http://pg-cluster-minio:9000 s3 ls --recursive s3://cnpg-backup/pg-cluster/
 ```
 
 Expected output: a `base/` directory with a timestamped backup and a `wals/` directory with compressed WAL files, the last of which should be roughly 1–16 MiB (post-switch WAL).
@@ -297,11 +340,10 @@ Before triggering restore, record the timestamp you want to recover to. The time
 
 ```bash
 # List available base backups to understand the archive range
-MINIO_POD=$(kubectl get pods -n cnpg-barman -l app=pg-cluster-minio -o jsonpath='{.items[0].metadata.name}')
-kubectl exec -n cnpg-barman "$MINIO_POD" -- sh -c "
-  mc alias set local http://localhost:9000 minioadmin minioadmin123 2>/dev/null
-  mc ls local/cnpg-backup/pg-cluster/base/
-"
+kubectl run s3-ls -n cnpg-barman --image=amazon/aws-cli:2.42.4 --restart=Never --rm -i \
+  --env=AWS_ACCESS_KEY_ID=minioadmin --env=AWS_SECRET_ACCESS_KEY=minioadmin123 \
+  --env=AWS_DEFAULT_REGION=us-east-1 -- \
+  --endpoint-url http://pg-cluster-minio:9000 s3 ls s3://cnpg-backup/pg-cluster/base/
 ```
 
 ### Step 2 — Delete the CNPG cluster
@@ -432,10 +474,11 @@ kubectl exec -n cnpg-barman "$PRIMARY" -- \
 ## Tearing down
 
 ```bash
-kubectl delete cluster.postgresql.cnpg.io pg-cluster -n cnpg-barman 2>/dev/null || true
+kubectl delete cluster.postgresql.cnpg.io pg-cluster pg-cluster-restored -n cnpg-barman 2>/dev/null || true
 kubectl delete namespace cnpg-barman
 kubectl delete blueprint cnpg-barman-blueprint -n kasten-io
 kubectl delete blueprintbinding cnpg-barman-blueprint-binding -n kasten-io
+kubectl delete policy cnpg-barman-backup -n kasten-io 2>/dev/null || true
 
 # Clean up restore point contents created by Kasten
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=cnpg-barman

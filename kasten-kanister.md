@@ -848,50 +848,59 @@ spec:
       labels:
         app: <workload>-minio
     spec:
+      # RustFS runs as uid/gid 10001: fsGroup makes the PVC writable for it.
+      securityContext:
+        fsGroup: 10001
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: <workload>-minio
       containers:
-        - name: minio
-          image: quay.io/minio/minio:latest
+        # The MinIO images can no longer be pulled (Docker Hub and quay.io deny the
+        # pull since 2026). RustFS is an S3-compatible server that replaces it here.
+        - name: rustfs
+          image: rustfs/rustfs:1.0.7
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
             runAsNonRoot: true
+            runAsUser: 10001        # the image user is named, so give the uid explicitly
+            runAsGroup: 10001
             seccompProfile:
               type: RuntimeDefault
           env:
-            - name: MINIO_ACCESS_KEY
+            - name: RUSTFS_ADDRESS
+              value: "0.0.0.0:9000"
+            - name: RUSTFS_CONSOLE_ENABLE
+              value: "false"
+            - name: RUSTFS_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: <workload>-minio-creds
                   key: accessKey
-            - name: MINIO_SECRET_KEY
+            - name: RUSTFS_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: <workload>-minio-creds
                   key: secretKey
-          args: ["server", "/data", "--console-address", ":9090"]
+          args: ["/data"]
           ports:
             - containerPort: 9000
               name: s3
-            - containerPort: 9090
-              name: console
           livenessProbe:
             httpGet:
-              path: /minio/health/live
+              path: /health
               port: 9000
-            initialDelaySeconds: 30
+            initialDelaySeconds: 10
             periodSeconds: 20
           readinessProbe:
             httpGet:
-              path: /minio/health/ready
+              path: /health/ready
               port: 9000
-            initialDelaySeconds: 30
-            periodSeconds: 20
+            initialDelaySeconds: 5
+            periodSeconds: 10
           volumeMounts:
             - mountPath: /data
               name: data
@@ -908,8 +917,6 @@ spec:
   ports:
     - port: 9000
       name: s3
-    - port: 9090
-      name: console
   type: ClusterIP
 ```
 

@@ -12,7 +12,7 @@ from veeam_deck import Deck  # noqa: E402
 
 d = Deck('cnpg-barman', 'cnpg-barman-example')
 
-d.title("CNPG BARMAN WITH A\nLOCAL MINIO KEEPER",
+d.title("CNPG BARMAN WITH A\nLOCAL S3 KEEPER",
         "Point-in-time recovery from a Kasten restore point — in-tree barman-cloud")
 
 d.agenda([
@@ -36,7 +36,7 @@ d.cards(
     "Both successors are in this repository — the choice depends on whether you want barman at all",
     [
         ('loop_left', "KEEP BARMAN: THE PLUGIN", [
-            "cnpg-barman-cloud-example uses the same pattern 5 MinIO-keeper design, "
+            "cnpg-barman-cloud-example uses the same pattern 5 S3-keeper design, "
             "upgraded to the Barman Cloud Plugin: an ObjectStore CR, spec.plugins, and "
             "a Backup with method: plugin.",
             "",
@@ -54,8 +54,8 @@ d.cards(
     ])
 
 d.flow(
-    "Pattern 5 — a local MinIO keeper",
-    "Barman writes to MinIO inside the namespace; Kasten snapshots only the MinIO PVC",
+    "Pattern 5 — a local S3 keeper (RustFS)",
+    "Barman writes to RustFS inside the namespace; Kasten snapshots only the keeper PVC",
     [
         ('database_storage', "CNPG CLUSTER",
          "WAL stream and barman base\nbackups. Its own data PVCs\nare excluded from the\n"
@@ -65,8 +65,8 @@ d.flow(
          "completes"),
         ('loop_left', "FORCE A WAL SWITCH",
          "pg_switch_wal() hands the\ncurrent segment to the\narchiver, then waits 15s\n"
-         "for the upload"),
-        ('shield_check', "KASTEN SNAPSHOTS THE MINIO PVC",
+         "for the upload, then\nsyncs the keeper Pod"),
+        ('shield_check', "KASTEN SNAPSHOTS THE KEEPER PVC",
          "A self-consistent barman\narchive: one base backup plus\nevery WAL up to the "
          "switch"),
     ],
@@ -79,7 +79,7 @@ d.flow(
 
 d.hero(
     "THE SNAPSHOT FREEZES", "AT THAT INSTANT",
-    body="Kasten snapshots the MinIO PVC as soon as the phase returns — no further WAL "
+    body="Kasten snapshots the keeper PVC as soon as the phase returns — no further WAL "
          "will ever join it.\nWithout the switch, the archive is missing the one WAL "
          "piece that makes the base backup usable.",
     pills=["pg_switch_wal()", "then a 15 second wait"],
@@ -102,11 +102,11 @@ d.cards(
             "barman-cloud does not support.",
             "Kasten's PVC snapshots are incremental; a plain barman export to an "
             "external store is a full transfer every time.",
-            "Because MinIO is in the namespace, a restore from the newest restore point "
+            "Because the keeper is in the namespace, a restore from the newest restore point "
             "reads the local PVC snapshot instead of fetching from the remote target.",
         ]),
         ('rocket_launch', "SELF-CONTAINED AND REPEATABLE", [
-            "Every component — MinIO Deployment, PVC, CNPG Cluster, Secrets, blueprint "
+            "Every component — keeper Deployment, PVC, CNPG Cluster, Secrets, blueprint "
             "— lives entirely inside the application namespace.",
             "The same manifests deploy verbatim in a new namespace by changing only the "
             "namespace name, which makes the pattern a good candidate for packaging as "
@@ -128,12 +128,12 @@ d.table_slide(
     row_heights=[0.5, 0.62, 0.62, 0.62],
     cards=[
         ('upload_cloud', "backupPrehook", [
-            "Creates the CNPG Backup CR, waits for completion, and forces the WAL "
-            "switch. Outputs backupName and namespace as restore-point artifacts, so "
+            "Creates the CNPG Backup CR, waits for completion, forces the WAL "
+            "switch, and runs sync in the keeper Pod. Outputs backupName and namespace as restore-point artifacts, so "
             "the restore side knows which base backup it is dealing with."]),
         ('close_circle', "delete", [
             "On restore-point deletion, removes the CNPG Backup CR from the application "
-            "namespace so the operator clears the matching barman data out of MinIO. "
+            "namespace so the operator clears the matching barman data out of the keeper. "
             "Silently does nothing if the namespace or the Backup CR has already gone."]),
     ])
 
@@ -146,7 +146,7 @@ d.split_dark(
          "to see the archive range. Then delete the cluster and wait for every pod to "
          "disappear."),
         ("02", "TRIGGER THE KASTEN RESTORE",
-         "Kasten restores the MinIO PVC, which brings back the whole barman archive — "
+         "Kasten restores the keeper PVC, which brings back the whole barman archive — "
          "base backups and WALs — as it stood when the snapshot was taken."),
         ("03", "CREATE A CNPG RECOVERY CLUSTER",
          "Point a recovery cluster at the restored archive through externalClusters to "
@@ -154,7 +154,7 @@ d.split_dark(
          "the in-tree integration."),
     ],
     left_body="You can recover to any moment from the start of the oldest base backup "
-              "in the restored MinIO snapshot onwards. Two things bound that window: "
+              "in the restored keeper snapshot onwards. Two things bound that window: "
               "the barman retentionPolicy, which decides how much archive exists, and "
               "the age of the Kasten restore point you restore from.")
 

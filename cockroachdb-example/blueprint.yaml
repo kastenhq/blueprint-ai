@@ -22,6 +22,9 @@ metadata:
 #   - CockroachDB pod label              : app=<cluster>
 #   - MinIO bucket                       : <cluster>-backups
 # where <cluster> = keeper Deployment name with the "-minio" suffix removed.
+#
+# The keeper runs RustFS (S3-compatible): the MinIO images can no longer be
+# pulled. The names keep "minio" so that existing bindings keep working.
 # ---------------------------------------------------------------------------
 actions:
   backupPrehook:
@@ -36,7 +39,7 @@ actions:
         name: crdbBackup
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.9
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           command:
             - bash
             - -o
@@ -65,8 +68,20 @@ actions:
                 echo "ERROR: no ready MinIO pod found (label app=${KEEPER})"
                 exit 1
               fi
-              echo "Ensuring bucket ${BUCKET} exists on MinIO pod ${MINIO_POD}..."
-              kubectl exec -n "${NS}" "${MINIO_POD}" -- mkdir -p "/data/${BUCKET}"
+              # Create the bucket through the S3 API (CreateBucket), not with mkdir on
+              # the data directory: only the S3 API is the same on every S3 server.
+              # curl in the keeper image signs the request (SigV4) with the keeper's
+              # own credentials. RustFS answers 200 for a new bucket and for one this
+              # user already owns, so the call is idempotent.
+              echo "Ensuring bucket ${BUCKET} exists on keeper pod ${MINIO_POD}..."
+              CODE=$(kubectl exec -n "${NS}" "${MINIO_POD}" -- sh -c \
+                'curl -s -o /dev/null -w "%{http_code}" --aws-sigv4 "aws:amz:us-east-1:s3" \
+                   --user "${RUSTFS_ACCESS_KEY}:${RUSTFS_SECRET_KEY}" \
+                   -X PUT "http://127.0.0.1:9000/'"${BUCKET}"'"')
+              case "${CODE}" in
+                200|409) echo "Bucket ${BUCKET} ready (HTTP ${CODE})." ;;
+                *) echo "ERROR: CreateBucket ${BUCKET} returned HTTP ${CODE}"; exit 1 ;;
+              esac
 
               # --- Find a ready CockroachDB pod to run SQL in ---
               CRDB_POD=$(kubectl get pods -n "${NS}" -l "app=${CLUSTER}" \
@@ -96,10 +111,10 @@ actions:
               kubectl exec -n "${NS}" "${CRDB_POD}" -- /cockroach/cockroach sql --insecure \
                 -e "BACKUP DATABASE ${DBS} INTO '${S3URL}';"
 
-              # --- sync: flush MinIO page cache to the block device BEFORE Kasten
-              #     snapshots the PVC. EBS snapshots bypass the OS page cache; an
+              # --- sync: flush the keeper page cache to the block device BEFORE Kasten
+              #     snapshots the PVC. CSI snapshots bypass the OS page cache; an
               #     un-synced object would be captured as a 0-byte file. ---
-              echo "Syncing MinIO PVC to disk..."
+              echo "Syncing keeper PVC to disk..."
               kubectl exec -n "${NS}" "${MINIO_POD}" -- sync
               sleep 3
               echo "Backup complete. MinIO PVC is consistent for the Kasten snapshot."
@@ -114,7 +129,7 @@ actions:
         name: crdbRestore
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.9
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           command:
             - bash
             - -o
@@ -209,7 +224,7 @@ actions:
         name: crdbDelete
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.9
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           command:
             - bash
             - -c

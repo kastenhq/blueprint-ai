@@ -12,12 +12,12 @@ from veeam_deck import Deck  # noqa: E402
 
 d = Deck('psmdb-pbm', 'psmdb-percona-operator-pbm-example')
 
-d.title("SHARDED PERCONA MONGODB\nWITH PBM AND A MINIO KEEPER",
+d.title("SHARDED PERCONA MONGODB\nWITH PBM AND AN S3 KEEPER",
         "Let the operator own cross-shard consistency; Kasten owns the archive")
 
 d.agenda([
     "Why sharding changes the answer",
-    "The pattern: pbm to a local MinIO keeper",
+    "The pattern: pbm to a local S3 keeper (RustFS)",
     "Why raw PVC snapshots fail across shards",
     "Blueprint actions",
     "Restore",
@@ -53,8 +53,8 @@ d.cards(
     ])
 
 d.flow(
-    "Pattern 5 — pbm backup via a local MinIO keeper",
-    "Kasten snapshots only the MinIO PVC; the PSMDB data PVCs are excluded by policy filter",
+    "Pattern 5 — pbm backup via a local S3 keeper (RustFS)",
+    "Kasten snapshots only the keeper PVC; the PSMDB data PVCs are excluded by policy filter",
     [
         ('database_storage', "SHARDED PSMDB CLUSTER",
          "Config replica set, shard\nreplica sets and mongos, each\nwith its own PVCs — "
@@ -62,10 +62,10 @@ d.flow(
         ('upload_cloud', "backupPrehook: BACKUP CR",
          "Creates a\nPerconaServerMongoDBBackup CR\nto trigger a pbm logical\nbackup "
          "across all shards"),
-        ('server_hardware', "MINIO KEEPER",
-         "A MinIO Deployment with a\npermanent PVC holds the pbm\narchive, inside the "
-         "namespace"),
-        ('shield_check', "KASTEN SNAPSHOTS THE MINIO PVC",
+        ('server_hardware', "S3 KEEPER (RUSTFS)",
+         "A RustFS Deployment with a\npermanent PVC holds the pbm\narchive; the blueprint "
+         "syncs it\nbefore the snapshot"),
+        ('shield_check', "KASTEN SNAPSHOTS THE KEEPER PVC",
          "A self-consistent pbm\narchive: a full logical backup\nof every shard and the\n"
          "config server"),
     ],
@@ -81,12 +81,12 @@ d.table_slide(
     "The blueprint is a thin orchestrator — the operator does the difficult part",
     ["Component", "Version"],
     [
-        ("Kubernetes", "1.32 (EKS)"),
-        ("Kasten", "8.5.4"),
+        ("Kubernetes", "1.35 (kind)"),
+        ("Kasten", "9.0.11"),
         ("PSMDB Operator / Helm chart", "1.22.0 / psmdb-db 1.22.2"),
         ("Percona Server for MongoDB", "8.0.19-7"),
         ("Percona Backup for MongoDB", "2.12.0"),
-        ("MinIO", "RELEASE.2025-04-22T22-12-26Z"),
+        ("S3 keeper", "RustFS 1.0.7"),
     ],
     col_widths=[3.4, 2.45],
     row_heights=[0.55] * 7,
@@ -110,16 +110,21 @@ d.table_slide(
     [
         ("backupPrehook",
          "Creates a PerconaServerMongoDBBackup CR to trigger a pbm logical backup "
-         "across all shards, polls until status.state reaches ready, and emits the "
+         "across all shards, polls until status.state reaches ready, runs sync in the "
+         "keeper Pod, and emits the "
          "backup CR name, the pbm internal name, the cluster name and the namespace as "
          "restore-point artifacts."),
         ("restorePosthook",
          "Waits for the PSMDB cluster to reach ready after Kasten restores the CR and "
-         "the MinIO PVC, creates a PerconaServerMongoDBRestore CR referencing the "
+         "the keeper PVC, creates a PerconaServerMongoDBRestore CR referencing the "
          "artifact backup name, then polls until status.state reaches ready."),
+        ("delete",
+         "On restore-point deletion, runs pbm delete-backup in the backup-agent "
+         "container and deletes the PerconaServerMongoDBBackup CR; does nothing if "
+         "the namespace or the pods are gone."),
     ],
     col_widths=[2.8, 9.5],
-    row_heights=[0.5, 1.5, 1.3],
+    row_heights=[0.5, 1.1, 1.0, 0.9],
     cards=[
         ('upload_cloud', "WHY THE ARTIFACTS MATTER", [
             "The restore side must name the exact pbm backup to replay. Carrying the "
@@ -127,7 +132,7 @@ d.table_slide(
             "point to the pbm archive inside it — rather than guessing at the newest "
             "backup in the repository, which may not be the one that was snapshotted."]),
         ('scan_target', "POLICY FILTER REQUIRED", [
-            "The backup policy must exclude the PSMDB data PVCs so that only the MinIO "
+            "The backup policy must exclude the PSMDB data PVCs so that only the keeper "
             "PVC is snapshotted. Snapshotting the shard volumes as well would put "
             "inconsistent per-shard state into the restore point alongside the good "
             "archive."]),
