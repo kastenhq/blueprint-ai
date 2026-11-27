@@ -18,7 +18,7 @@ actions:
         name: triggerPbmBackup
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.4
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           command:
             - bash
             - -o
@@ -76,6 +76,15 @@ actions:
                 -o jsonpath='{.status.pbmName}')
               echo "pbm backup name: ${PBM_NAME}"
 
+              # Flush the keeper filesystem: the CSI snapshot captures the block
+              # device, and data still in the page cache would be missing from it.
+              # The policy snapshots the PVCs of this keeper Deployment (the bound
+              # object), so syncing its pod covers every PVC that holds the archive.
+              # Must stay the last write-related step before the snapshot.
+              echo "Flushing the keeper filesystem (sync in deploy/${KEEPER})..."
+              kubectl exec -n "${NS}" "deploy/${KEEPER}" -- sync
+              echo "Keeper PVC is ready for Kasten snapshot."
+
               kando output backupCRName "${BACKUP_CR_NAME}"
               kando output pbmName "${PBM_NAME}"
               kando output clusterName "${CLUSTER}"
@@ -89,7 +98,7 @@ actions:
         name: restoreFromPbm
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.4
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           command:
             - bash
             - -o
@@ -176,7 +185,7 @@ actions:
         name: deletePbmBackup
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.4
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           command:
             - bash
             - -o

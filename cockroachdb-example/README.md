@@ -68,15 +68,19 @@ restored and the `restorePosthook` runs `RESTORE` into the CockroachDB cluster.
 
 ## Versions
 
-Versions used when this blueprint was developed and tested:
+Versions used for the last end-to-end test (backup, restore, `delete` action), on 2026-11-27:
 
 | Component | Version |
 |---|---|
-| Kubernetes | `1.32` (EKS) |
-| Kasten | `8.5.9` |
+| Kubernetes | `1.35` (kind, `csi-hostpath-sc` from the CSI hostpath driver) |
+| Kasten | `9.0.11` |
 | CockroachDB | `v24.3.33` |
-| MinIO | `RELEASE.2025-04-22T22-12-26Z` |
-| Tool image | `ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.9` (adds `kubectl` to `kanister-tools`) |
+| S3 keeper | RustFS `1.0.7` (`rustfs/rustfs:1.0.7`) |
+| S3 client (checks) | AWS CLI `2.42.4` (`amazon/aws-cli:2.42.4`) |
+| Tool image | `ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11` (adds `kubectl` to `kanister-tools`) |
+
+The blueprint was first developed on EKS `1.32` with Kasten `8.5.9` and a MinIO keeper
+(`RELEASE.2025-04-22T22-12-26Z`).
 
 Detect your Kasten version from the cluster:
 
@@ -84,18 +88,49 @@ Detect your Kasten version from the cluster:
 helm ls -n kasten-io
 ```
 
+### Why the keeper runs RustFS and not MinIO
+
+The MinIO images can no longer be pulled. On 2026-11-27, `quay.io/minio/minio` answered
+`no such manifest`, and `minio/minio` and `minio/mc` on Docker Hub answered
+`denied: requested access to the resource is denied`. A keeper Pod with the old image stays in
+`ImagePullBackOff`.
+
+The keeper now runs [RustFS](https://github.com/rustfs/rustfs), an S3-compatible server under the
+Apache 2.0 license. CockroachDB `BACKUP` only needs the S3 API, and the same `s3://` URL works
+(`AWS_ENDPOINT`, `AWS_REGION=us-east-1`, `AWS_USE_PATH_STYLE=true`). What changes in
+[minio-keeper.yaml](minio-keeper.yaml) and [blueprint.yaml](blueprint.yaml):
+
+| MinIO | RustFS |
+|---|---|
+| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` (same Secret) |
+| `args: [server, /data, --console-address, ":9001"]` | `args: [/data]`, console disabled |
+| runs as root | runs as uid `10001`: the Pod sets `fsGroup: 10001` so it can write to the PVC |
+| the blueprint created the bucket with `mkdir /data/<bucket>` | the blueprint creates it with an S3 `CreateBucket` request, sent by `curl` in the keeper Pod |
+
+**Why the bucket is no longer created with `mkdir`.** MinIO treats a directory in its data path as
+a bucket. RustFS 1.0.7 also accepted it in our test, but the bucket had no creation date (it was
+listed as `1970-01-01`), which shows that RustFS did not record it as a bucket of its own. An S3
+`CreateBucket` request works the same way on every S3 server. The request is signed with the
+keeper's own credentials (`curl --aws-sigv4`), and RustFS answers `200` both for a new bucket and
+for one that already exists, so the phase can be retried.
+
+The resource names still contain `minio` (`cockroachdb-minio`, label `cockroachdb-minio`): the
+blueprint finds the CockroachDB cluster name by removing the `-minio` suffix from the Deployment
+name, and existing deployments keep working with the same binding.
+
+> **Existing MinIO keepers.** Replacing only the image of a running MinIO keeper, so that RustFS
+> reads the MinIO data directory, was **not tested**. Deploy a new keeper, take a new backup with
+> it, and keep the old restore points until they expire. They restore the old MinIO Deployment,
+> which cannot start unless the MinIO image is still in a cache or a mirror you control.
+
 ## Custom image
 
-The blueprint runs its phases with `ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.9`, which is
-`gcr.io/kasten-images/kanister-tools:8.5.9` plus `kubectl` (the stock image has no `kubectl`).
-The CockroachDB `BACKUP`/`RESTORE` SQL runs **inside** a CockroachDB pod via `kubectl exec`, so no
-extra database tooling is needed in the image. A `Dockerfile` for an equivalent image:
-
-```dockerfile
-FROM gcr.io/kasten-images/kanister-tools:8.5.9
-RUN curl -LO "https://dl.k8s.io/release/v1.32.0/bin/linux/amd64/kubectl" \
-    && install -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl
-```
+The blueprint runs its phases with `ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11`, which is
+`gcr.io/kasten-images/kanister-tools:9.0.11` plus `kubectl` and `jq` (the stock image has no
+`kubectl`). Its Dockerfile is the shared one in
+[../images/kasten-tools/Dockerfile](../images/kasten-tools/Dockerfile). Use the tag that matches
+your Kasten version. The CockroachDB `BACKUP`/`RESTORE` SQL runs **inside** a CockroachDB pod via
+`kubectl exec`, so no extra database tooling is needed in the image.
 
 ## Deployment
 
@@ -105,7 +140,7 @@ RUN curl -LO "https://dl.k8s.io/release/v1.32.0/bin/linux/amd64/kubectl" \
 kubectl create namespace cockroachdb-test
 ```
 
-### 2. Deploy the MinIO keeper
+### 2. Deploy the S3 keeper (RustFS)
 
 ```bash
 kubectl apply -f minio-keeper.yaml
@@ -114,7 +149,8 @@ kubectl apply -f minio-keeper.yaml
 This creates the `cockroachdb-minio` Secret, PVC (10Gi), Deployment (labelled
 `cockroachdb-minio: "true"`), and Service.
 
-> **Storage class**: `ebs-sc` is the AWS EBS CSI storage class used in our test environment.
+> **Storage class**: `ebs-sc` is the AWS EBS CSI storage class used in our first test environment
+> (the last test ran on kind with `csi-hostpath-sc`).
 > Replace it with a storage class that supports CSI snapshots on your cluster
 > (e.g. `managed-csi` on AKS, `standard-rwo` on GKE, your custom class on bare-metal, etc.).
 > The class must have a matching `VolumeSnapshotClass` registered with Kasten.
@@ -133,6 +169,18 @@ The same `ebs-sc` storage-class note applies to the `volumeClaimTemplates` in
 `cockroachdb-statefulset.yaml`.
 
 After the init Job completes, all three pods become `1/1 Ready`.
+
+> **Single-node test cluster (kind).** Each CockroachDB pod requests `1Gi` of memory. On a small
+> single-node cluster that already runs Kasten, the pods can stay `Pending` with
+> `Insufficient memory`. For the kind test we lowered the request at apply time and kept the limit:
+>
+> ```bash
+> sed -e 's/ebs-sc/csi-hostpath-sc/' -e 's/memory: "1Gi"/memory: "384Mi"/' \
+>   cockroachdb-statefulset.yaml | kubectl apply -f -
+> ```
+>
+> The pod anti-affinity is `preferred`, so the three pods can share one node. Do not do this in
+> production.
 
 ### 4. Create test data
 
@@ -178,7 +226,7 @@ MinIO PVC has no such label, so it remains in the snapshot.
 
 | Action | When called | What it does |
 |---|---|---|
-| `backupPrehook` | Before the PVC snapshot | Ensures the MinIO bucket exists; discovers user databases (excludes `system`/`defaultdb`/`postgres`); runs `BACKUP DATABASE … INTO` the MinIO collection; `sync`s the MinIO PVC; outputs `databases`/`bucket`/`namespace` artifacts. |
+| `backupPrehook` | Before the PVC snapshot | Creates the bucket if it is missing (S3 `CreateBucket`, sent by `curl` in the keeper pod); discovers user databases (excludes `system`/`defaultdb`/`postgres`); runs `BACKUP DATABASE … INTO` the keeper collection; `sync`s the keeper PVC (last step); outputs `databases`/`bucket`/`namespace` artifacts. |
 | `restorePosthook` | After the MinIO PVC is restored | Waits for the MinIO keeper and a ready CockroachDB pod; discovers databases in the LATEST backup; `DROP DATABASE IF EXISTS` each then `RESTORE DATABASE … FROM LATEST IN` the MinIO collection. |
 | `delete` | On restore-point deletion | Informational no-op — the backup collection lives on the MinIO PVC, whose lifecycle is governed by Kasten snapshot retention. |
 
@@ -243,9 +291,10 @@ kubectl delete pvc -l app=cockroachdb -n cockroachdb-test
 kubectl delete pvc cockroachdb-minio -n cockroachdb-test --ignore-not-found
 kubectl delete namespace cockroachdb-test
 
-# remove the blueprint + binding
+# remove the blueprint + binding, and the test policy
 kubectl delete -f blueprintbinding.yaml --ignore-not-found
 kubectl delete -f blueprint.yaml --ignore-not-found
+kubectl delete policy cockroachdb-backup -n kasten-io --ignore-not-found
 
 # remove Kasten restore point contents created for the test
 kubectl delete restorepointcontent -l k10.kasten.io/appNamespace=cockroachdb-test

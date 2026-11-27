@@ -730,13 +730,23 @@ PID=<project id printed in the Location header>
 Add a notebook and a job through the CP4D web UI (Watson Studio): a two-cell Python notebook, then
 a job that runs it. Then the two data assets:
 
+The `minio/mc` client image can no longer be pulled (Docker Hub denies the pull), so the bucket and
+the CSV are written with the AWS CLI. Any S3 server at `minio.minio.svc:9000` works. If you deploy
+it from [kasten-s3troubleshooting](https://github.com/michaelcourcy/kasten-s3troubleshooting?tab=readme-ov-file#test-with-a-minio-instance),
+replace its MinIO image too: see the [4.8 runbook](../4.8/README.md) for an image that still pulls.
+
 ```bash
-# (a) a 3-row CSV on the in-cluster MinIO, used as the external datasource
-kubectl run mc-fixture -n minio --image=minio/mc:latest --restart=Never --rm -i --command -- sh -c '
-  mc alias set local http://minio.minio.svc:9000 minio minio123
-  mc mb -p local/cp4d-fixture
+# (a) a 3-row CSV on the in-cluster S3 server, used as the external datasource
+#     HOME=/tmp: OpenShift runs the pod with a random UID that has no writable home.
+#     head-bucket first, because "s3 mb" fails when the bucket already exists.
+kubectl run s3-fixture -n minio --image=amazon/aws-cli:2.42.4 --restart=Never --rm -i \
+  --env=AWS_ACCESS_KEY_ID=minio --env=AWS_SECRET_ACCESS_KEY=minio123 \
+  --env=AWS_DEFAULT_REGION=us-east-1 --env=HOME=/tmp --command -- sh -c '
+  S3="aws --endpoint-url http://minio.minio.svc:9000 s3"
+  aws --endpoint-url http://minio.minio.svc:9000 s3api head-bucket --bucket cp4d-fixture 2>/dev/null \
+    || $S3 mb s3://cp4d-fixture
   printf "id,name,value\n1,alpha,100\n2,beta,200\n3,gamma,300\n" > /tmp/sample.csv
-  mc cp /tmp/sample.csv local/cp4d-fixture/sample.csv'
+  $S3 cp /tmp/sample.csv s3://cp4d-fixture/sample.csv'
 
 # (b) a FILE data asset — bytes uploaded INTO the project, so they WILL be in the bundle
 printf 'id,name,value\n1,alpha,100\n2,beta,200\n3,gamma,300\n' > sample.csv

@@ -31,6 +31,9 @@ metadata:
     cnpg-barman-cloud-minio: "true"
 spec:
   replicas: 1
+  # RWO PVC: the old pod must release the volume before the new one starts.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: pg-cluster-minio
@@ -39,21 +42,29 @@ spec:
       labels:
         app: pg-cluster-minio
     spec:
+      # RustFS runs as uid/gid 10001: fsGroup makes the PVC writable for it.
+      securityContext:
+        fsGroup: 10001
       containers:
-        - name: minio
-          image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+        # S3 keeper. The MinIO images are no longer published (Docker Hub and
+        # quay.io deny the pull), so the keeper runs RustFS, an S3-compatible
+        # server. The resource names keep "minio": the blueprint derives the
+        # CNPG cluster name from the "-minio" suffix of this Deployment.
+        - name: rustfs
+          image: rustfs/rustfs:1.0.7
           args:
-            - server
             - /data
-            - --console-address
-            - ":9001"
           env:
-            - name: MINIO_ROOT_USER
+            - name: RUSTFS_ADDRESS
+              value: "0.0.0.0:9000"
+            - name: RUSTFS_CONSOLE_ENABLE
+              value: "false"
+            - name: RUSTFS_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: pg-cluster-minio-creds
                   key: rootUser
-            - name: MINIO_ROOT_PASSWORD
+            - name: RUSTFS_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: pg-cluster-minio-creds
@@ -61,16 +72,14 @@ spec:
           ports:
             - containerPort: 9000
               name: api
-            - containerPort: 9001
-              name: console
           volumeMounts:
             - name: data
               mountPath: /data
           readinessProbe:
             httpGet:
-              path: /minio/health/ready
+              path: /health/ready
               port: 9000
-            initialDelaySeconds: 10
+            initialDelaySeconds: 5
             periodSeconds: 5
       volumes:
         - name: data
@@ -89,6 +98,3 @@ spec:
     - name: api
       port: 9000
       targetPort: 9000
-    - name: console
-      port: 9001
-      targetPort: 9001

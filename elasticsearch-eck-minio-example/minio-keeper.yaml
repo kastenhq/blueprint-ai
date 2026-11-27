@@ -1,7 +1,12 @@
-# Pattern 5 — MinIO keeper for Elasticsearch S3 snapshot repository
+# Pattern 5 — S3 keeper for Elasticsearch S3 snapshot repository
+#
+# The keeper runs RustFS, an S3-compatible server: the MinIO images can no longer
+# be pulled (Docker Hub and quay.io deny the pull). The resource names keep
+# "minio" so existing bindings and the blueprint's "<workload>-minio" naming
+# convention keep working.
 #
 # The Secret holds two pairs of keys:
-#   - rootUser/rootPassword              → consumed by MinIO as MINIO_ROOT_USER/PASSWORD
+#   - rootUser/rootPassword              → consumed by RustFS as RUSTFS_ACCESS_KEY/SECRET_KEY
 #   - s3.client.default.access_key/secret_key → loaded into the Elasticsearch
 #                                          keystore via ECK secureSettings (same values)
 apiVersion: v1
@@ -41,6 +46,9 @@ metadata:
     kasten.io/workload-kind: Elasticsearch
 spec:
   replicas: 1
+  # RWO PVC: the old pod must release the volume before the new one starts.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: es-cluster-minio
@@ -49,21 +57,25 @@ spec:
       labels:
         app: es-cluster-minio
     spec:
+      # RustFS runs as uid/gid 10001: fsGroup makes the PVC writable for it.
+      securityContext:
+        fsGroup: 10001
       containers:
-        - name: minio
-          image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+        - name: rustfs
+          image: rustfs/rustfs:1.0.7
           args:
-            - server
             - /data
-            - --console-address
-            - ":9001"
           env:
-            - name: MINIO_ROOT_USER
+            - name: RUSTFS_ADDRESS
+              value: "0.0.0.0:9000"
+            - name: RUSTFS_CONSOLE_ENABLE
+              value: "false"
+            - name: RUSTFS_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
                   name: es-cluster-minio-creds
                   key: rootUser
-            - name: MINIO_ROOT_PASSWORD
+            - name: RUSTFS_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: es-cluster-minio-creds
@@ -71,23 +83,21 @@ spec:
           ports:
             - containerPort: 9000
               name: api
-            - containerPort: 9001
-              name: console
           volumeMounts:
             - name: data
               mountPath: /data
           readinessProbe:
             httpGet:
-              path: /minio/health/ready
+              path: /health/ready
               port: 9000
-            initialDelaySeconds: 10
+            initialDelaySeconds: 5
             periodSeconds: 5
-        # Sidecar — blueprint phases KubeExec into this container. The MinIO
-        # image ships without curl, so we use the Kanister tools image which
-        # bundles curl + kando (needed for kando output artifact emission)
-        # + sync, all in one Red Hat UBI minimal base.
+        # Sidecar — blueprint phases KubeExec into this container. It uses the
+        # Kanister tools image because the phases need kando (to emit the
+        # output artifact) as well as curl and sync. sync flushes every
+        # filesystem of the node, the keeper PVC included.
         - name: tools
-          image: gcr.io/kasten-images/kanister-tools:8.5.7
+          image: gcr.io/kasten-images/kanister-tools:9.0.11
           command: ["sleep", "infinity"]
       volumes:
         - name: data
@@ -106,6 +116,3 @@ spec:
     - name: api
       port: 9000
       targetPort: 9000
-    - name: console
-      port: 9001
-      targetPort: 9001

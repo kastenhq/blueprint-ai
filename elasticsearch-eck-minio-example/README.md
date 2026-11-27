@@ -1,9 +1,10 @@
 # Elasticsearch (ECK) + MinIO Keeper — Kasten Blueprint
 
 Pattern 5 (local MinIO keeper) for an ECK-managed Elasticsearch cluster.
-Elasticsearch's native S3 snapshot repository writes to a local MinIO instance;
-Kasten snapshots the MinIO PVC, capturing the full ES snapshot archive in each
-restore point.
+Elasticsearch's native S3 snapshot repository writes to a local S3 server (the
+keeper, which now runs RustFS — see
+[why not MinIO](#why-the-keeper-runs-rustfs-and-not-minio)); Kasten snapshots
+the keeper PVC, capturing the full ES snapshot archive in each restore point.
 
 This blueprint is the **Pattern 5 alternative** to the existing
 [`elasticsearch-eck-example/`](../elasticsearch-eck-example/) blueprint (Pattern 3 — permanent
@@ -16,13 +17,55 @@ workload PVC with shared filesystem repository). Use this one when:
 
 ## Versions
 
+Versions used for the last end-to-end test (backup with export, in-place restore,
+restore after namespace deletion, `delete` action), on 2026-11-27:
+
 | Component | Version |
 |---|---|
-| Kubernetes | `1.32` (EKS) |
-| Kasten | `8.5.7` |
+| Kubernetes | `1.35` (kind, `csi-hostpath-sc` from the CSI hostpath driver) |
+| Kasten | `9.0.11` |
 | ECK operator | `2.16.1` |
 | Elasticsearch | `8.17.0` |
-| MinIO | `RELEASE.2025-04-22T22-12-26Z` |
+| S3 keeper | RustFS `1.0.7` (`rustfs/rustfs:1.0.7`) |
+| Keeper sidecar | `gcr.io/kasten-images/kanister-tools:9.0.11` |
+| `delete` action image | `ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11` ([Dockerfile](../images/kasten-tools/Dockerfile)) |
+| S3 client (bucket creation) | AWS CLI `2.42.4` (`amazon/aws-cli:2.42.4`) |
+
+The blueprint was first developed on EKS `1.32` with Kasten `8.5.7` and a MinIO
+keeper (`RELEASE.2025-04-22T22-12-26Z`).
+
+Both image tags in the table must equal your Kasten version. Detect it with
+`helm ls -n kasten-io`, then change the tag in [minio-keeper.yaml](minio-keeper.yaml)
+and [blueprint.yaml](blueprint.yaml).
+
+### Why the keeper runs RustFS and not MinIO
+
+The MinIO images can no longer be pulled. On 2026-11-27, `quay.io/minio/minio` answered
+`no such manifest`, and `minio/minio` and `minio/mc` on Docker Hub answered
+`denied: requested access to the resource is denied`. A keeper Pod with the old image stays in
+`ImagePullBackOff`.
+
+The keeper now runs [RustFS](https://github.com/rustfs/rustfs), an S3-compatible server under the
+Apache 2.0 license. Elasticsearch only needs the S3 API: the same repository settings
+(`protocol: http`, `path_style_access: true`) work, and `POST /_snapshot/kasten-repo/_verify`
+succeeds on every node. What changes in [minio-keeper.yaml](minio-keeper.yaml):
+
+| MinIO | RustFS |
+|---|---|
+| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | `RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` (same Secret keys `rootUser` / `rootPassword`) |
+| `args: [server, /data, --console-address, ":9001"]` | `args: [/data]`, console disabled |
+| probe `/minio/health/ready` | probe `/health/ready` |
+| runs as root | runs as uid `10001`: the Pod sets `fsGroup: 10001` so it can write to the PVC |
+| bucket created with `mc mb` inside the MinIO container | bucket created with `aws s3 mb` from a separate Pod (the RustFS image has no `mc`) |
+
+The resource names still contain `minio` (`es-cluster-minio`, label `minio-s3-keeper`): the
+blueprint builds the keeper Service name as `<workload>-minio`, and existing deployments keep
+working with the same binding.
+
+> **Existing MinIO keepers.** Replacing only the image of a running MinIO keeper, so that RustFS
+> reads the MinIO data directory, was **not tested**. Deploy a new keeper, take a new backup with
+> it, and keep the old restore points until they expire. They restore the old MinIO Deployment,
+> which cannot start unless the MinIO image is still in a cache or a mirror you control.
 
 ## Pattern
 
@@ -49,25 +92,26 @@ workload PVC with shared filesystem repository). Use this one when:
                                           Kasten CSI snapshot ─┘
 ```
 
-- A MinIO `Deployment` with a permanent PVC stores the Elasticsearch S3
+- An S3 keeper `Deployment` (RustFS) with a permanent PVC stores the Elasticsearch S3
   snapshot archive. Kasten snapshots **only this PVC** (the ES data PVCs are
   excluded — they are recreated from the ES snapshot on restore).
-- The keeper pod has a `curl` sidecar container so that the blueprint can
-  `KubeExec` into the keeper to talk to the Elasticsearch HTTP API. Using
+- The keeper pod has a `tools` sidecar container (`kanister-tools`, which has
+  `curl`, `kando` and `sync`) so that the blueprint can `KubeExec` into the
+  keeper to talk to the Elasticsearch HTTP API. Using
   `KubeExec` into the keeper rather than a `KubeTask` in `kasten-io` lets the
   blueprint use `.Object.metadata.labels` / `.Object.metadata.namespace`
   directly — the keeper Deployment **is** the BlueprintBinding context.
 - Workload identity (ES cluster name + kind) is carried as labels on the
-  MinIO Deployment so that one generic blueprint can serve many keepers.
+  keeper Deployment so that one generic blueprint can serve many keepers.
 
 ### Blueprint actions
 
 | Action | What it does |
 |---|---|
-| `backupPrehook` | `KubeExec` into the keeper's `curl` sidecar → `PUT /_snapshot/kasten-repo/kasten-<timestamp>` on the Elasticsearch HTTP API to create a new native snapshot, polls until `state=SUCCESS`, then emits the snapshot name as a `kasten-snapshot` artifact. |
+| `backupPrehook` | `KubeExec` into the keeper's `tools` sidecar → `PUT /_snapshot/kasten-repo/kasten-<timestamp>?wait_for_completion=true` on the Elasticsearch HTTP API to create a new native snapshot, checks `state=SUCCESS`, runs `sync` (the last step before the snapshot: it flushes the keeper writes from the page cache to the disk), then emits the snapshot name as a `kastenSnapshot` artifact. |
 | `backupPosthook` | No-op (placeholder for symmetry). |
-| `restorePosthook` | Where the actual recovery happens. Waits for the ES cluster to be reachable after Kasten restores the MinIO PVC, re-registers the snapshot repository (idempotent), deletes the live copies of the snapshot's user indices, then `POST /_snapshot/kasten-repo/<snapshot>/_restore` with `include_global_state: false`. Polls until the restore completes. Works identically whether the cluster is live (in-place) or freshly rebuilt by ECK (DR). |
-| `delete` | Called by Kasten when a restore point is retired. Receives the `kasten-snapshot` artifact and issues `DELETE /_snapshot/kasten-repo/<snapshot>`. Idempotent — treats `snapshot_missing_exception` as success. |
+| `restorePosthook` | Where the actual recovery happens. Waits for the ES cluster to be reachable after Kasten restores the keeper PVC, re-registers the snapshot repository (idempotent), deletes the live copies of the snapshot's user indices, then `POST /_snapshot/kasten-repo/<snapshot>/_restore` with `include_global_state: false`. Polls until the restore completes. Works identically whether the cluster is live (in-place) or freshly rebuilt by ECK (DR). |
+| `delete` | Called by Kasten when a restore point is retired. Receives the `kastenSnapshot` artifact and issues `DELETE /_snapshot/kasten-repo/<snapshot>`. Idempotent — treats `snapshot_missing_exception` as success. |
 
 ## Snapshot lifecycle (no per-backup cleanup)
 
@@ -89,7 +133,7 @@ retired restore point causes its ES snapshot to be deleted.
   - `ebs-sc` — AWS EBS CSI on EKS.
 
   > **Storage class**: `ebs-sc` is the AWS EBS CSI storage class used in our
-  > test environment. Replace it with a storage class that supports CSI
+  > first test environment (the last test ran on kind with `csi-hostpath-sc`). Replace it with a storage class that supports CSI
   > snapshots on your cluster (e.g. `managed-csi` on AKS, `standard-rwo` on
   > GKE, your custom class on bare-metal). The class must have a matching
   > `VolumeSnapshotClass` registered with Kasten. Do **not** use legacy
@@ -97,7 +141,7 @@ retired restore point causes its ES snapshot to be deleted.
 
 ## Deployment
 
-### 1. Create the namespace and the MinIO keeper
+### 1. Create the namespace and the S3 keeper (RustFS)
 
 ```bash
 kubectl create ns elasticsearch-eck-minio
@@ -106,14 +150,17 @@ kubectl wait --for=condition=Available --timeout=180s \
   deployment/es-cluster-minio -n elasticsearch-eck-minio
 ```
 
-### 2. Create the MinIO bucket used by Elasticsearch
+### 2. Create the bucket used by Elasticsearch
 
 ```bash
-kubectl exec -n elasticsearch-eck-minio deploy/es-cluster-minio -c minio -- \
-  mc alias set local http://localhost:9000 minioadmin minioadminpassword
-kubectl exec -n elasticsearch-eck-minio deploy/es-cluster-minio -c minio -- \
-  mc mb --ignore-existing local/es-snapshots
+kubectl run s3-init -n elasticsearch-eck-minio --image=amazon/aws-cli:2.42.4 \
+  --restart=Never --rm -i \
+  --env=AWS_ACCESS_KEY_ID=minioadmin --env=AWS_SECRET_ACCESS_KEY=minioadminpassword \
+  --env=AWS_DEFAULT_REGION=us-east-1 -- \
+  --endpoint-url http://es-cluster-minio:9000 s3 mb s3://es-snapshots
 ```
+
+Expected: `make_bucket: es-snapshots`.
 
 ### 3. Create the Elasticsearch cluster
 
@@ -122,6 +169,29 @@ kubectl apply -f elasticsearch.yaml
 kubectl wait --for=jsonpath='{.status.health}'=green --timeout=600s \
   elasticsearch/es-cluster -n elasticsearch-eck-minio
 ```
+
+> **Single-node test cluster (kind).** Three Elasticsearch nodes with the ECK default memory
+> (`2Gi` each) do not fit on a small single-node cluster that already runs Kasten: the pods stay
+> `Pending` with `Insufficient memory`. For the kind test we applied a copy of
+> [elasticsearch.yaml](elasticsearch.yaml) with `count: 2` (enough for `number_of_replicas: 1`
+> and a `green` cluster) and this `podTemplate` under the node set. The repository file is
+> unchanged.
+>
+> ```yaml
+>       podTemplate:
+>         spec:
+>           containers:
+>             - name: elasticsearch
+>               env:
+>                 - name: ES_JAVA_OPTS
+>                   value: "-Xms512m -Xmx512m"
+>               resources:
+>                 requests: {memory: 1Gi, cpu: 250m}
+>                 limits: {memory: 1Gi}
+> ```
+>
+> `node.store.allow_mmap: false` is already set in the file, so no `vm.max_map_count` change
+> is needed on the node.
 
 ### 4. Register the S3 snapshot repository (one-time setup)
 
@@ -300,7 +370,7 @@ Use case: rollback after data loss inside an otherwise-healthy cluster
 (dropped index, bad migration, etc.).
 
 Trigger the restore from the Kasten dashboard (or a `RestoreAction`).
-Kasten restores the MinIO PVC; the live ES CR and StatefulSet are left
+Kasten restores the keeper PVC; the live ES CR and StatefulSet are left
 alone; `restorePosthook` deletes the affected indices and restores them
 from the snapshot. The cluster is never torn down.
 
@@ -311,7 +381,7 @@ cluster after a regional outage.
 
 Restore from the **exported** restore point in the Kasten dashboard — the
 UI re-creates the namespace, the `RestorePoint`, and the `RestoreAction`
-for you (no manual API objects needed). Kasten restores the ES CR + MinIO
+for you (no manual API objects needed). Kasten restores the ES CR + the
 keeper; ECK rebuilds the cluster from scratch with fresh empty PVCs;
 `restorePosthook` waits for ES to be reachable, **(re-)registers the
 snapshot repository** (idempotent — needed because the rebuilt cluster's
@@ -373,6 +443,7 @@ kubectl delete -f blueprint.yaml --ignore-not-found
 kubectl delete -f elasticsearch.yaml --ignore-not-found
 kubectl delete -f minio-keeper.yaml --ignore-not-found
 kubectl delete ns elasticsearch-eck-minio --ignore-not-found
+kubectl delete policy <your-policy> -n kasten-io --ignore-not-found
 
 # Clean up retained Kasten snapshot contents (replace selector if needed)
 kubectl delete restorepointcontent \
@@ -388,7 +459,7 @@ All lifecycle phases pass end-to-end:
   snapshot name as a Kanister artifact. Kasten then snapshots the MinIO
   PVC and exports the data to S3. The ES data PVCs are never touched.
 - **In-place rollback** — no CR deletion, no cluster downtime. Kasten
-  restores the MinIO PVC; the live ES CR and StatefulSet are untouched;
+  restores the keeper PVC; the live ES CR and StatefulSet are untouched;
   `restorePosthook` deletes the affected indices and re-hydrates them
   from the snapshot via the ES REST API.
 - **DR restore** — `kubectl delete ns elasticsearch-eck-minio` + restore

@@ -15,7 +15,7 @@ actions:
         name: triggerBarmanBackup
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.9
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           command:
             - bash
             - -o
@@ -86,10 +86,17 @@ actions:
                   psql -U postgres -At -c "SELECT pg_switch_wal();"
                 echo "Waiting 15s for WAL archival to complete..."
                 sleep 15
-                echo "WAL archival done. MinIO PVC is ready for Kasten snapshot."
+                echo "WAL archival done."
               else
                 echo "WARNING: no primary pod found, skipping WAL switch"
               fi
+
+              # Flush the keeper filesystem: the CSI snapshot captures the block
+              # device, and data still in the page cache would be missing from it.
+              # Must stay the last write-related step before the snapshot.
+              echo "Flushing the keeper filesystem (sync in deploy/${KEEPER})..."
+              kubectl exec -n "${NS}" "deploy/${KEEPER}" -- sync
+              echo "Keeper PVC is ready for Kasten snapshot."
 
               kando output backupName "${BACKUP_NAME}"
               kando output namespace "${NS}"
@@ -102,7 +109,7 @@ actions:
         name: deleteBarmanBackup
         args:
           namespace: kasten-io
-          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:8.5.9
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.11
           command:
             - bash
             - -o

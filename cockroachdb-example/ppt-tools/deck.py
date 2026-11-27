@@ -12,8 +12,8 @@ from veeam_deck import Deck  # noqa: E402
 
 d = Deck('cockroachdb', 'cockroachdb-example')
 
-d.title("COCKROACHDB WITH KASTEN\nAND A LOCAL MINIO KEEPER",
-        "The database's own BACKUP writes to MinIO; Kasten snapshots the MinIO PVC")
+d.title("COCKROACHDB WITH KASTEN\nAND A LOCAL S3 KEEPER",
+        "The database's own BACKUP writes to RustFS; Kasten snapshots the keeper PVC")
 
 d.agenda([
     "Why snapshotting the node PVCs does not work",
@@ -63,8 +63,8 @@ d.cards(
     style='negative', body_size=11)
 
 d.flow(
-    "Pattern 5 — a local MinIO keeper",
-    "Kasten snapshots only the MinIO PVC; the CockroachDB data PVCs are filtered out",
+    "Pattern 5 — a local S3 keeper (RustFS)",
+    "Kasten snapshots only the keeper PVC; the CockroachDB data PVCs are filtered out",
     [
         ('database_storage', "COCKROACHDB STATEFULSET",
          "Three nodes, each with its\nown datadir PVC — all\nexcluded from the snapshot\n"
@@ -72,27 +72,27 @@ d.flow(
         ('upload_cloud', "backupPrehook: BACKUP INTO",
          "KubeExec into a CockroachDB\npod runs a transactionally\nconsistent BACKUP to "
          "an\ns3:// URL"),
-        ('server_hardware', "MINIO KEEPER",
-         "A MinIO Deployment in the\napplication namespace is the\nlocal S3 endpoint, "
+        ('server_hardware', "RUSTFS KEEPER",
+         "A RustFS Deployment in the\napplication namespace is the\nlocal S3 endpoint, "
          "backed by\na permanent PVC"),
-        ('shield_check', "KASTEN SNAPSHOTS THE MINIO PVC",
+        ('shield_check', "KASTEN SNAPSHOTS THE KEEPER PVC",
          "That one snapshot holds a\nself-consistent CockroachDB\nbackup collection"),
     ],
     note=("Incrementality comes for free, twice over.",
           "BACKUP INTO an existing collection produces an incremental backup rather "
           "than a full one, and Kasten's PVC snapshots are themselves incremental. The "
-          "blueprint binds to the MinIO Deployment — the keeper — not to CockroachDB."))
+          "blueprint binds to the keeper Deployment, not to CockroachDB."))
 
 d.table_slide(
     "Versions and the naming convention",
     "The convention is required: the blueprint derives every name from the keeper Deployment",
     ["Component", "Version"],
     [
-        ("Kubernetes", "1.32 (EKS)"),
-        ("Kasten", "8.5.9"),
+        ("Kubernetes", "1.35 (kind)"),
+        ("Kasten", "9.0.11"),
         ("CockroachDB", "v24.3.33"),
-        ("MinIO", "RELEASE.2025-04-22T22-12-26Z"),
-        ("Tool image", "kasten-tools:8.5.9"),
+        ("S3 keeper", "RustFS 1.0.7"),
+        ("Tool image", "kasten-tools:9.0.11"),
     ],
     col_widths=[3.0, 2.85],
     row_heights=[0.55] * 6,
@@ -113,15 +113,15 @@ d.table_slide(
     ["Action", "When called", "What it does"],
     [
         ("backupPrehook", "Before the PVC snapshot",
-         "Ensures the MinIO bucket exists; discovers user databases, excluding system, "
-         "defaultdb and postgres; runs BACKUP DATABASE ... INTO the MinIO collection; "
-         "syncs the MinIO PVC; outputs the databases, bucket and namespace artifacts."),
-        ("restorePosthook", "After the MinIO PVC is restored",
-         "Waits for the MinIO keeper and for a ready CockroachDB pod; discovers the "
+         "Creates the bucket if missing (S3 CreateBucket via curl in the keeper pod); discovers user databases, excluding system, "
+         "defaultdb and postgres; runs BACKUP DATABASE ... INTO the keeper collection; "
+         "syncs the keeper PVC as the last step; outputs the databases, bucket and namespace artifacts."),
+        ("restorePosthook", "After the keeper PVC is restored",
+         "Waits for the keeper and for a ready CockroachDB pod; discovers the "
          "databases in the LATEST backup; DROP DATABASE IF EXISTS each one, then "
          "RESTORE DATABASE ... FROM LATEST IN the collection."),
         ("delete", "On restore-point deletion",
-         "An informational no-op. The backup collection lives on the MinIO PVC, whose "
+         "An informational no-op. The backup collection lives on the keeper PVC, whose "
          "lifecycle is governed by Kasten snapshot retention."),
     ],
     col_widths=[2.3, 2.7, 7.3],
@@ -131,7 +131,7 @@ d.table_slide(
 d.steps_dark(
     "Deploy and run", "Four steps to a restore point",
     [
-        ('rocket_launch', "DEPLOY THE MINIO KEEPER",
+        ('rocket_launch', "DEPLOY THE RUSTFS KEEPER",
          "kubectl apply -f minio-keeper.yaml creates the credentials Secret, a 10Gi PVC, "
          "the Deployment labelled cockroachdb-minio, and the Service."),
         ('database_storage', "DEPLOY COCKROACHDB",
@@ -139,15 +139,15 @@ d.steps_dark(
          "pods labelled app=<cluster>."),
         ('settings_gear', "DEPLOY THE BLUEPRINT",
          "The Blueprint and BlueprintBinding go in kasten-io. The binding targets the "
-         "MinIO Deployment, not CockroachDB."),
+         "keeper Deployment, not CockroachDB."),
         ('upload_cloud', "BACK UP, EXCLUDING THE NODE PVCs",
-         "The policy must filter out the CockroachDB datadir PVCs so only the MinIO PVC "
+         "The policy must filter out the CockroachDB datadir PVCs so only the keeper PVC "
          "is snapshotted — snapshotting the node volumes would capture unrestorable "
          "partial state."),
     ])
 
 d.ending("THE BACKUP IS AN OBJECT, NOT A DISK",
-         "CockroachDB writes a consistent collection to MinIO. Kasten snapshots that "
+         "CockroachDB writes a consistent collection to the keeper. Kasten snapshots that "
          "one PVC.\ngithub.com/kastenhq/blueprint-ai — cockroachdb-example")
 
 d.save()

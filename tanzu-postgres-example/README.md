@@ -26,6 +26,14 @@ retirement. See [What was validated](#what-was-validated).
 | MinIO | `RELEASE.2025-04-22T22-12-26Z` |
 | `kasten-tools` image | `9.0.4` |
 
+> **The MinIO image can no longer be pulled** (checked on 2026-11-27: `quay.io/minio/minio`
+> answers `no such manifest`, and `minio/minio` and `minio/mc` on Docker Hub deny the pull). This
+> blueprint was validated with that image and has not been re-tested with a replacement. The other
+> keeper blueprints moved to RustFS, an S3-compatible server; see
+> [cnpg-barman-cloud-example](../cnpg-barman-cloud-example/README.md#why-the-keeper-runs-rustfs-and-not-minio)
+> for the changes it needs. Note that this keeper must serve HTTPS, which RustFS does with
+> `RUSTFS_TLS_PATH`.
+
 The `kasten-tools` tag must equal the Kasten version on your cluster. Detect it with
 `helm ls -n kasten-io`, then change the tag in [blueprint.yaml](blueprint.yaml). The image is
 `gcr.io/kasten-images/kanister-tools` plus `kubectl` and `jq`; its Dockerfile is

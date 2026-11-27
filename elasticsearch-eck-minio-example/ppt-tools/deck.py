@@ -12,20 +12,20 @@ from veeam_deck import Deck  # noqa: E402
 
 d = Deck('elasticsearch-eck-minio', 'elasticsearch-eck-minio-example')
 
-d.title("ELASTICSEARCH ON ECK\nWITH A MINIO KEEPER",
+d.title("ELASTICSEARCH ON ECK\nWITH AN S3 KEEPER",
         "The native S3 snapshot repository, kept local to the namespace")
 
 d.agenda([
     "How this differs from the filesystem-repository blueprint",
-    "The pattern and the keeper's curl sidecar",
+    "The pattern and the keeper's tools sidecar",
     "Snapshot lifecycle: one per restore point",
     "Blueprint actions",
 ])
 
 d.hero(
     "NO RWX PVC,", "NO SHARED FILESYSTEM",
-    body="Elasticsearch writes its native snapshots to a MinIO instance over S3 "
-         "instead of to a shared path.\nKasten snapshots the MinIO PVC, capturing the "
+    body="Elasticsearch writes its native snapshots to a RustFS keeper over S3 "
+         "instead of to a shared path.\nKasten snapshots the keeper PVC, capturing the "
          "whole archive in every restore point.",
     pills=["No RWX requirement", "Per-restore-point snapshots", "Block storage is enough"],
     icon='cloud_storage')
@@ -43,7 +43,7 @@ d.cards(
             "the RWX class must also support CSI snapshots.",
         ]),
         ('checkbox_multiple', "WHAT THIS ONE NEEDS", [
-            "Only ordinary block storage for a single MinIO PVC. Nothing is mounted "
+            "Only ordinary block storage for a single keeper PVC. Nothing is mounted "
             "across the Elasticsearch nodes at all.",
             "",
             "Choose it when you do not want an RWX repository PVC spanning every node, "
@@ -53,23 +53,23 @@ d.cards(
     ])
 
 d.flow(
-    "Pattern 5 — a local MinIO keeper",
-    "Elasticsearch talks S3 to MinIO in the same namespace; Kasten snapshots only the MinIO PVC",
+    "Pattern 5 — a local S3 keeper (RustFS)",
+    "Elasticsearch talks S3 to RustFS in the same namespace; Kasten snapshots only the keeper PVC",
     [
         ('database_storage', "ELASTICSEARCH, 3 NODES",
          "Its own data PVCs are not\nthe restore source and are\nexcluded from the "
          "snapshot"),
         ('upload_cloud', "NATIVE S3 SNAPSHOT",
-         "Elasticsearch writes to the\nkasten-repo S3 repository,\nbacked by the MinIO "
+         "Elasticsearch writes to the\nkasten-repo S3 repository,\nbacked by the RustFS "
          "keeper"),
-        ('server_hardware', "MINIO KEEPER + CURL SIDECAR",
+        ('server_hardware', "RUSTFS KEEPER + TOOLS SIDECAR",
          "es-cluster-minio, with a\npermanent PVC holding\n/data/es-snapshots/"),
-        ('shield_check', "KASTEN SNAPSHOTS THE MINIO PVC",
+        ('shield_check', "KASTEN SNAPSHOTS THE KEEPER PVC",
          "One snapshot holding the\nfull Elasticsearch snapshot\narchive"),
     ],
-    note=("Why the keeper carries a curl sidecar.",
-          "The blueprint has to call the Elasticsearch HTTP API, but the MinIO image "
-          "has no HTTP client. Adding a curl sidecar to the keeper pod gives KubeExec "
+    note=("Why the keeper carries a tools sidecar.",
+          "The blueprint calls the Elasticsearch HTTP API and must emit artifacts with "
+          "kando, which the S3 image lacks. A kanister-tools sidecar to the keeper pod gives KubeExec "
           "somewhere to run from, with no custom image to build and no tooling added to "
           "Elasticsearch itself. Workload identity — the ES cluster name and kind — is "
           "carried as labels on the keeper."))
@@ -88,18 +88,18 @@ d.table_slide(
     ["Action", "What it does"],
     [
         ("backupPrehook",
-         "KubeExec into the keeper's curl sidecar; PUT a new native snapshot "
-         "kasten-<timestamp> on the Elasticsearch API, poll until state=SUCCESS, then "
-         "emit the snapshot name as the kasten-snapshot artifact."),
+         "KubeExec into the keeper's tools sidecar; PUT a new native snapshot "
+         "kasten-<timestamp> on the Elasticsearch API, check state=SUCCESS, run sync, "
+         "then emit the snapshot name as the kastenSnapshot artifact."),
         ("backupPosthook",
          "A no-op, kept as a placeholder for symmetry."),
         ("restorePosthook",
          "Where recovery actually happens. Waits for the cluster to be reachable after "
-         "Kasten restores the MinIO PVC, re-registers the repository idempotently, "
+         "Kasten restores the keeper PVC, re-registers the repository idempotently, "
          "deletes the live copies of the snapshot's user indices, then POSTs the "
          "restore with include_global_state: false and polls to completion."),
         ("delete",
-         "Called when Kasten retires a restore point. Receives the kasten-snapshot "
+         "Called when Kasten retires a restore point. Receives the kastenSnapshot "
          "artifact and issues DELETE for that snapshot. Idempotent — treats "
          "snapshot_missing_exception as success."),
     ],
@@ -108,8 +108,8 @@ d.table_slide(
     body_size=10.5,
     cards=[
         ('file_list', "TESTED VERSIONS", [
-            "Kubernetes 1.32 on EKS, Kasten 8.5.7, ECK operator 2.16.1, Elasticsearch "
-            "8.17.0, MinIO RELEASE.2025-04-22T22-12-26Z."]),
+            "Kubernetes 1.35 on kind, Kasten 9.0.11, ECK operator 2.16.1, Elasticsearch "
+            "8.17.0, RustFS 1.0.7 (first tested on EKS with MinIO)."]),
         ('checkbox_multiple', "ONE RESTORE PATH, TWO SITUATIONS", [
             "The restorePosthook works identically whether the cluster is still live — "
             "an in-place restore — or has just been rebuilt from scratch by ECK in a "
