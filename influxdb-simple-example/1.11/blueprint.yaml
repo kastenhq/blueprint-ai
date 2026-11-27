@@ -1,0 +1,73 @@
+apiVersion: cr.kanister.io/v1alpha1
+kind: Blueprint
+metadata:
+  name: influxdb-simple
+  namespace: kasten-io
+# Pattern 2 (quiesce) for a single-replica InfluxDB 1.x Deployment.
+# InfluxDB 1.x has no command to pause writes, so the blueprint stops it:
+#   backupPrehook   start a watchdog Job, scale the Deployment to 0, wait until the pod is gone
+#   (Kasten snapshots the PVC of a stopped database)
+#   backupPosthook  scale it back to the saved replica count, delete the watchdog
+#   restorePosthook same as backupPosthook, for a Deployment restored at 0 replicas
+# The replica count is saved in the annotation blueprint-ai/influxdb-replicas.
+# The scripts are in the ConfigMap influxdb-simple-scripts (built from scripts/).
+actions:
+  backupPrehook:
+    phases:
+      - func: KubeTask
+        name: stopInfluxDB
+        args:
+          namespace: kasten-io
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.8
+          podOverride:
+            volumes:
+              - name: scripts
+                configMap: {name: influxdb-simple-scripts, defaultMode: 0755}
+            containers:
+              - name: container
+                volumeMounts:
+                  - {name: scripts, mountPath: /scripts}
+          command:
+            - bash
+            - -c
+            - /scripts/stop.sh "{{ .Deployment.Namespace }}" "{{ .Deployment.Name }}"
+
+  backupPosthook:
+    phases:
+      - func: KubeTask
+        name: startInfluxDB
+        args:
+          namespace: kasten-io
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.8
+          podOverride:
+            volumes:
+              - name: scripts
+                configMap: {name: influxdb-simple-scripts, defaultMode: 0755}
+            containers:
+              - name: container
+                volumeMounts:
+                  - {name: scripts, mountPath: /scripts}
+          command:
+            - bash
+            - -c
+            - /scripts/start.sh "{{ .Deployment.Namespace }}" "{{ .Deployment.Name }}"
+
+  restorePosthook:
+    phases:
+      - func: KubeTask
+        name: startInfluxDB
+        args:
+          namespace: kasten-io
+          image: ghcr.io/kastenhq/blueprint-ai/kasten-tools:9.0.8
+          podOverride:
+            volumes:
+              - name: scripts
+                configMap: {name: influxdb-simple-scripts, defaultMode: 0755}
+            containers:
+              - name: container
+                volumeMounts:
+                  - {name: scripts, mountPath: /scripts}
+          command:
+            - bash
+            - -c
+            - /scripts/start.sh "{{ .Deployment.Namespace }}" "{{ .Deployment.Name }}"

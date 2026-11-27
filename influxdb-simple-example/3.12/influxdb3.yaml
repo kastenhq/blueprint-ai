@@ -1,0 +1,85 @@
+# Test InfluxDB 3 Core: single node, "file" object store on one RWO PVC.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: influxdb3
+  labels:
+    app: influxdb3
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ceph-block
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: influxdb3
+  labels:
+    app: influxdb3
+spec:
+  replicas: 1
+  # Recreate: the PVC is RWO, two pods must never run at the same time.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: influxdb3
+  template:
+    metadata:
+      labels:
+        app: influxdb3
+    spec:
+      securityContext:
+        runAsUser: 1500
+        runAsGroup: 1500
+        fsGroup: 1500
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: influxdb3
+          image: influxdb:3.12.3-core
+          args:
+            - serve
+            - --node-id=node0
+            - --object-store=file
+            - --data-dir=/var/lib/influxdb3/data
+            - --http-bind=0.0.0.0:8181
+            # /health and /ping without a token, for the readiness probe
+            - --disable-authz=health,ping
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          env:
+            # The influxdb3 CLI reads it, so `kubectl exec ... influxdb3 query` works.
+            # Optional: the token is created after the first start (see README).
+            - name: INFLUXDB3_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef: {name: influxdb3-admin-token, key: token, optional: true}
+          ports:
+            - name: api
+              containerPort: 8181
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8181
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/influxdb3
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: influxdb3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: influxdb3
+spec:
+  selector:
+    app: influxdb3
+  ports:
+    - name: api
+      port: 8181

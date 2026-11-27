@@ -1,0 +1,29 @@
+# On-demand Kasten policy for the InfluxDB test namespace: snapshot, then export the
+# restore point to object storage. backupParameters.profile must be a Location profile:
+# it is the profile Kanister phases run with, and the one recorded for the restore.
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Policy
+metadata:
+  name: influxdb-simple-test-backup
+  namespace: kasten-io
+spec:
+  comment: InfluxDB 1.x stop/snapshot/start blueprint (pattern 2) - on-demand backup and export
+  frequency: '@onDemand'
+  selector:
+    matchExpressions:
+      - key: k10.kasten.io/appNamespace
+        operator: In
+        values: [influxdb-simple-test]
+  actions:
+    - action: backup
+      backupParameters:
+        profile:
+          name: kasten-backups        # replace with your Location profile
+          namespace: kasten-io
+    - action: export
+      exportParameters:
+        profile:
+          name: kasten-backups        # replace with your Location profile
+          namespace: kasten-io
+        exportData:
+          enabled: true

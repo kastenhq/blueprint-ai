@@ -1,0 +1,49 @@
+# Step 3 only: writes 10 points per request, with consecutive "seq" values, into the
+# database "stress", and records the highest seq InfluxDB acknowledged in /tmp/acked.
+# A restored copy is consistent if it holds seq 1..N with no gap, and N >= the value
+# of /tmp/acked read just before the snapshot was taken.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: writer
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: writer}
+  template:
+    metadata:
+      labels: {app: writer}
+    spec:
+      securityContext:
+        runAsUser: 1500
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: writer
+          image: influxdb:3.12.3-core
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          env:
+            - name: TOKEN
+              valueFrom:
+                secretKeyRef: {name: influxdb3-admin-token, key: token}
+          command:
+            - bash
+            - -c
+            - |
+              seq=0; echo 0 > /tmp/acked
+              while :; do
+                body=""
+                for i in $(seq 1 10); do
+                  seq=$((seq + 1))
+                  body+="stress,src=writer seq=${seq}i,val=$RANDOM $(date +%s%N)"$'\n'
+                done
+                # Default write mode: the reply comes after the WAL flush.
+                if curl -sf -o /dev/null -H "Authorization: Bearer $TOKEN" \
+                     --data-binary "$body" "http://influxdb3:8181/api/v3/write_lp?db=stress&precision=nanosecond"; then
+                  echo "$seq" > /tmp/acked
+                else
+                  echo "write failed at seq $seq"; seq=$((seq - 10)); sleep 1
+                fi
+              done

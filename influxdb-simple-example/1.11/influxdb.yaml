@@ -1,0 +1,75 @@
+# Test copy of a single-replica InfluxDB 1.x Deployment, shaped like the
+# garmin-grafana chart: one Deployment, one RWO PVC, auth enabled.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: influxdb
+  labels:
+    app: influxdb
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ceph-block
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: influxdb
+  labels:
+    app: influxdb
+spec:
+  replicas: 1
+  # Recreate: the PVC is RWO, two pods must never run at the same time.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: influxdb
+  template:
+    metadata:
+      labels:
+        app: influxdb
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: influxdb
+          image: influxdb:1.11.8
+          env:
+            - name: INFLUXDB_DB
+              value: testdb
+            - name: INFLUXDB_HTTP_AUTH_ENABLED
+              value: "true"
+          envFrom:
+            - secretRef:
+                name: influxdb-credentials
+          ports:
+            - name: api
+              containerPort: 8086
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: 8086
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/influxdb
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: influxdb
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: influxdb
+spec:
+  selector:
+    app: influxdb
+  ports:
+    - name: api
+      port: 8086

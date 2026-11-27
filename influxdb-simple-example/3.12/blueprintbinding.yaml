@@ -1,0 +1,29 @@
+# Binds the influxdb-simple blueprint to every Deployment labelled
+# blueprint-ai/influxdb-simple=true, in any namespace. The label is an explicit
+# opt-in: this blueprint stops the workload during a backup, so it must never
+# match a Deployment by accident. DoesNotExist lets one Deployment use another
+# blueprint through the kanister.kasten.io/blueprint annotation.
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: BlueprintBinding
+metadata:
+  name: influxdb-simple-binding
+  namespace: kasten-io
+spec:
+  blueprintRef:
+    name: influxdb-simple
+    namespace: kasten-io
+  resources:
+    matchAll:
+      - type:
+          operator: In
+          values:
+            - group: apps
+              resource: deployments
+      - labels:
+          key: blueprint-ai/influxdb-simple
+          operator: In
+          values:
+            - "true"
+      - annotations:
+          key: kanister.kasten.io/blueprint
+          operator: DoesNotExist
